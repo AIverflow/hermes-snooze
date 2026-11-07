@@ -55,6 +55,31 @@ class ReminderTextTest(unittest.TestCase):
         self.assertEqual(echo.missed_text(self.snooze(3)), "⌛ Missed: Stretch (3 reminders, no answer)")
         self.assertEqual(echo.missed_text(self.snooze(1)), "⌛ Missed: Stretch (1 reminder, no answer)")
 
+    def test_missed_text_of_a_test_snooze(self):
+        sn = self.snooze(1)
+        sn.test = True
+        self.assertEqual(echo.missed_text(sn), echo.TEST_MISSED)
+        self.assertIn("no reply received in 2 min", echo.missed_text(sn))
+
+
+class GatewayWarningTest(unittest.TestCase):
+    def render(self, **kw):
+        sn = Snooze(
+            id=1,
+            text="Stretch",
+            created=NOW.isoformat(),
+            target=Target("telegram", "1", "1"),
+            schedule=Schedule(first_at=NOW.isoformat(), every=10, until=(NOW + timedelta(hours=1)).isoformat()),
+            confirm={"kind": "ok", "value": ""},
+        )
+        return echo.render_echo(sn, NOW, "this chat", False, 10, timedelta(minutes=10), **kw)
+
+    def test_warning_is_the_last_line_when_the_gateway_is_off(self):
+        self.assertEqual(self.render(gateway_off=True).splitlines()[-1], echo.GATEWAY_OFF_WARNING)
+
+    def test_no_warning_by_default(self):
+        self.assertNotIn("gateway", self.render())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,6 +60,7 @@ class RoundTripTest(TmpCase):
             next_at="2026-11-07T18:00:00+00:00",
             last_message_id=99,
             last_error="boom",
+            test=True,
         )
         saved = self.store.add(s)
         self.assertEqual(saved.id, 1)
@@ -98,6 +99,13 @@ class RoundTripTest(TmpCase):
         doc["snoozes"][0]["future_field"] = 1
         self.store.path.write_text(json.dumps(doc))
         self.assertEqual(len(self.store.load()), 1)
+
+    def test_record_without_test_field_loads_as_not_a_test(self):
+        self.store.add(make())
+        doc = json.loads(self.store.path.read_text())
+        del doc["snoozes"][0]["test"]
+        self.store.path.write_text(json.dumps(doc))
+        self.assertFalse(self.store.load()[0].test)
 
     def test_no_temp_files_left(self):
         self.store.add(make())

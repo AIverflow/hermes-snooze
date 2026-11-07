@@ -8,7 +8,7 @@ A reminder for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that
 
 ## Status
 
-Work in progress. Working today: the `/snooze` command and all its subcommands, the `snooze_create` tool, the parser, the confirm matcher and the store. **Not wired yet:** sending the reminders on a timer, catching `ok` / `later` / `yes` replies from the chat and `/snooze test`. Until then, manage snoozes with the `/snooze ok|later|cancel|yes` subcommands.
+Work in progress. Every part is built (command, tool, timer, reply hooks, `then`, `/snooze test`); not yet tested end to end on a phone.
 
 ## Install and first steps
 
@@ -78,7 +78,7 @@ Examples:
 | `/snooze later [N] [id]` | Push back by `N` minutes (`30`, `30m`, `1h`) from now. Before the first reminder, push from that reminder's time instead. Default: the snooze interval. |
 | `/snooze cancel <id>` | Stop without confirming. |
 | `/snooze yes [id]` | Start a snooze that is waiting for validation. Without an id: the newest waiting one. |
-| `/snooze test` | Not available yet. |
+| `/snooze test` | Check the setup: sends one test reminder to this chat within 15 s; reply `ok` within 2 min and you get "Test passed". It tells you at once if no gateway runs for this profile (then no test is made). |
 
 If the first word is a subcommand name but the rest does not fit it, the text is read as a new reminder when it parses as one: `/snooze cancel the order at 4pm` creates a reminder; otherwise you get the usage line.
 
@@ -168,7 +168,7 @@ Snoozes are stored per profile in the plugin data directory:
 
 ## Limits
 
-- A Hermes process must be running to send reminders. Ideally run the gateway on an always-on machine; a sleeping laptop sends nothing.
+- The gateway must be running for the profile (`hermes gateway start`): it sends the reminders and reads your replies. Ideally run it on an always-on machine; a sleeping laptop sends nothing. If it is not running, a new snooze's echo warns you.
 - Do Not Disturb on your phone is your job: allow the bot's notifications, and do not mute the chat.
 - Voice-note confirms are not supported.
 - WhatsApp Cloud API is not supported (it cannot send 24 hours after your last message).

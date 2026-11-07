@@ -10,6 +10,23 @@ from .store import PENDING, Snooze
 
 PLATFORM_LABELS = {"whatsapp": "WhatsApp", "whatsapp_cloud": "WhatsApp Cloud", "sms": "SMS"}
 
+# `/snooze test`: a snooze flagged `test` (see README, "Commands").
+TEST_TEXT = "🧪 Snooze test"
+TEST_WINDOW = timedelta(minutes=2)  # time the user has to reply
+TEST_ARRIVES_IN = 15  # seconds; the timer's tick (`send.TICK_SECONDS`)
+TEST_PASSED = "✅ Test passed: reminders are sent and your replies are received."
+TEST_MISSED = (
+    "❌ Test: no reply received in 2 min. Check that the gateway serves this profile and that you replied in this chat."
+)
+TEST_GATEWAY_OFF = (
+    "🧪 Snooze test not started\n"
+    "❌ Gateway not running for this profile: it could send nothing and read no reply. "
+    "Start it (hermes gateway start), then run /snooze test again."
+)
+GATEWAY_OFF_WARNING = (
+    "⚠️ The gateway is not running for this profile: no reminder will be sent until it runs (hermes gateway start)."
+)
+
 
 def from_iso(value: Any) -> datetime | None:
     if not isinstance(value, str):
@@ -87,7 +104,13 @@ def _stop_text(rule: Any) -> str:
 
 
 def render_echo(
-    snooze: Snooze, now: datetime, where: str, capped: bool, cap_reminders: int, yes_window: timedelta
+    snooze: Snooze,
+    now: datetime,
+    where: str,
+    capped: bool,
+    cap_reminders: int,
+    yes_window: timedelta,
+    gateway_off: bool = False,
 ) -> str:
     """What the user sees after creating a snooze: local times, where, how to stop, how to undo."""
     sched = snooze.schedule
@@ -119,7 +142,26 @@ def render_echo(
         minutes = format_minutes(minutes_value(yes_window))
         lines.append(f"Waiting:  nothing is sent until you reply yes (within {minutes})")
         lines.append(f"Reply `yes` to start it (or `/snooze yes {snooze.id}`).")
+    if gateway_off:
+        lines.append(GATEWAY_OFF_WARNING)
     return "\n".join(lines)
+
+
+def test_started_text(snooze: Snooze, where: str, gateway_running: bool | None) -> str:
+    """The reply to `/snooze test`: the check that can be done now, and what to do next."""
+    if gateway_running is None:
+        check = "❔ Gateway: could not check whether it runs for this profile"
+    else:
+        check = "✅ Gateway running for this profile" if gateway_running else "❌ Gateway not running for this profile"
+    return "\n".join(
+        [
+            f"🧪 Snooze test #{snooze.id}",
+            check,
+            f"A test reminder will arrive in the next {TEST_ARRIVES_IN} s "
+            f"({platform_label(snooze.target.platform)}, {where}): reply `ok`.",
+            f"No reply within {format_minutes(minutes_value(TEST_WINDOW))}: the test fails.",
+        ]
+    )
 
 
 def _ordinal(n: int) -> str:
@@ -140,5 +182,7 @@ def reminder_text(snooze: Snooze, late_by: timedelta | None = None) -> str:
 
 def missed_text(snooze: Snooze) -> str:
     """The message when a snooze ends without an answer."""
+    if snooze.test:
+        return TEST_MISSED
     n = snooze.sent_count
     return f"⌛ Missed: {snooze.text} ({n} reminder{'' if n == 1 else 's'}, no answer)"

@@ -75,6 +75,7 @@ class Snooze:
     next_at: str | None = None
     last_message_id: Any = None
     last_error: str | None = None
+    test: bool = False  # made by `/snooze test`: its texts differ (see README)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

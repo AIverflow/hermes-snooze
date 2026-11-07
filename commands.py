@@ -157,6 +157,8 @@ def not_started_message(snooze: Snooze) -> str:
 def confirm_snooze(snooze: Snooze) -> str:
     """The user confirmed a running snooze: it is done."""
     snooze.state, snooze.next_at = DONE, None
+    if snooze.test:
+        return echo.TEST_PASSED
     if snooze.then:
         return f"✅ Done: {snooze.text}. Now: {snooze.then}…"
     return f"✅ Done: {snooze.text}"
@@ -261,6 +263,34 @@ def hermes_paused() -> bool:
     return hermes_is_paused()
 
 
+def hermes_gateway_running() -> bool | None:
+    """Whether a gateway serves the active profile: True, False, or None if it cannot be told.
+
+    Same check as `hermes profile show` (`hermes_cli/profiles.py:743-754`, `_check_gateway_running`):
+    `gateway.status.resolve_gateway_liveness` (`gateway/status.py:1378`) = the profile's `gateway.pid`
+    checked against its `gateway.lock`, then the runtime status, then a default-profile multiplexer
+    that serves this profile. `cleanup_stale=False`: a probe never deletes files.
+    """
+    from .send import in_gateway  # send imports this module: lazy, not at the top
+
+    if in_gateway():
+        return True
+    try:
+        from gateway.status import get_running_pid, resolve_gateway_liveness
+        from hermes_constants import get_hermes_home
+
+        liveness = resolve_gateway_liveness(
+            profile_dir=get_hermes_home(),
+            use_cache=False,
+            pid_probe=lambda path: get_running_pid(path, cleanup_stale=False),
+        )
+    except Exception:
+        return None
+    if not liveness.running and liveness.probe_error:
+        return None
+    return bool(liveness.running)
+
+
 def hermes_home_target() -> Target | None:
     """The first home channel set in the profile, or None."""
     try:
@@ -314,6 +344,7 @@ class Commands:
         session_env: Callable[[str], str] = hermes_session_env,
         is_paused: Callable[[], bool] = hermes_paused,
         run_then: Callable[[Snooze, Any], None] | None = None,
+        gateway_running: Callable[[], bool | None] = hermes_gateway_running,
     ):
         self._ctx = ctx
         self._data_dir = data_dir
@@ -322,6 +353,7 @@ class Commands:
         self._session_env = session_env
         self._is_paused = is_paused
         self._run_then = run_then  # hands a confirmed snooze's `then` to the agent (hooks.Hooks.then_after_reply)
+        self._gateway_running = gateway_running
 
     # -- entry points --------------------------------------------------------
 
@@ -351,6 +383,8 @@ class Commands:
             return HELP
         name, *args = text.split()
         name = name.lower()
+        if name == "test" and not args:
+            return self._test(source)
 
         if name in SUBCOMMANDS:
             reply = self._cmd_ok(args, source) if name == "ok" else getattr(self, f"_cmd_{name}")(args)
@@ -387,13 +421,16 @@ class Commands:
             return Target(platform=platform, chat_id=chat_id, user_id=user_id or None), "this chat"
         return self._home_target(), "home channel"
 
-    def _add(self, spec: Spec, target: Target) -> tuple[Snooze, bool, Settings, datetime]:
-        """Store a new snooze for `spec`. Returns (record, whether its stop time is the cap, settings, now)."""
+    def _add(self, spec: Spec, target: Target, *, test: bool = False) -> tuple[Snooze, bool, Settings, datetime]:
+        """Store a new snooze for `spec`. Returns (record, whether its stop time is the cap, settings, now).
+
+        A `test` snooze starts at once: it has no `yes` step.
+        """
         settings = read_settings(self._ctx)
         now = self._now()
         capped = spec.until is None
         until = spec.until or spec.first_at + timedelta(minutes=settings.cap_minutes)
-        active = not settings.validate_setup
+        active = test or not settings.validate_setup
         record = Snooze(
             text=_no_media_tag(spec.text),
             created=_iso(now),
@@ -408,6 +445,7 @@ class Commands:
             then=_no_media_tag(spec.then),
             state=ACTIVE if active else PENDING,
             next_at=_iso(spec.first_at) if active else None,
+            test=test,
         )
         return self._store().add(record), capped, settings, now
 
@@ -415,7 +453,12 @@ class Commands:
         if target is None:
             return NO_TARGET_TEXT
         record, capped, settings, now = self._add(spec, target)
-        return echo.render_echo(record, now, where, capped, settings.cap_reminders, PENDING_TIMEOUT)
+        return self._echo(record, now, where, capped, settings)
+
+    def _echo(self, record: Snooze, now: datetime, where: str, capped: bool, settings: Settings) -> str:
+        """The echo of a new snooze, plus the warning if no gateway runs for the profile (none if it cannot be told)."""
+        off = self._gateway_running() is False
+        return echo.render_echo(record, now, where, capped, settings.cap_reminders, PENDING_TIMEOUT, gateway_off=off)
 
     def _create_from_tool(self, args: dict) -> dict:
         settings = read_settings(self._ctx)
@@ -469,7 +512,7 @@ class Commands:
             "ok": True,
             "id": record.id,
             "state": record.state,
-            "message": echo.render_echo(record, now, where, capped, settings.cap_reminders, PENDING_TIMEOUT),
+            "message": self._echo(record, now, where, capped, settings),
             "note": (
                 "Show `message` to the user as it is. "
                 + (
@@ -536,9 +579,32 @@ class Commands:
         return "\n".join(lines)
 
     def _cmd_test(self, rest: list) -> str | None:
-        if rest:
-            return None
-        return "🧪 `/snooze test` is not available yet."
+        return None  # `/snooze test` alone is handled by `_test`; with words after it, it is a reminder
+
+    def _test(self, source: Any) -> str:
+        """`/snooze test`: one reminder now, to confirm with `ok` within `TEST_WINDOW`. See the README.
+
+        The command cannot wait for the reply, so it reports the check it can do now. With no gateway
+        nothing would be sent, so no test is made.
+        """
+        target, where = self._command_target(source)
+        if target is None:
+            return NO_TARGET_TEXT
+        running = self._gateway_running()
+        if running is False:
+            return echo.TEST_GATEWAY_OFF
+        now = self._now()
+        spec = Spec(
+            text=echo.TEST_TEXT,
+            first_at=now,
+            every=echo.TEST_WINDOW,  # the next reminder would fall after `until`: the test sends one
+            until=now + echo.TEST_WINDOW,
+            confirm=ConfirmRule(),
+            then=None,
+            tz=read_settings(self._ctx).timezone,
+        )
+        record, *_ = self._add(spec, target, test=True)
+        return echo.test_started_text(record, where, running)
 
     def _cmd_ok(self, rest: list, source: Any = None) -> str | None:
         sid = self._optional_id(rest)

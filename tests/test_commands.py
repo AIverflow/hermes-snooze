@@ -5,8 +5,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
-from snooze import commands, confirm
+from snooze import commands, confirm, echo, schedule
 from snooze.commands import Commands
 from snooze.store import ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, Store, Target
 
@@ -52,6 +53,7 @@ class Base(unittest.TestCase):
         self.home = HOME
         self.env = {}
         self.paused = False
+        self.gateway = True  # True, False or None (cannot tell)
         self.ctx = FakeCtx(**self.config)
         self.cmds = Commands(
             self.ctx,
@@ -60,6 +62,7 @@ class Base(unittest.TestCase):
             home_target=lambda: self.home,
             session_env=lambda name: self.env.get(name, ""),
             is_paused=lambda: self.paused,
+            gateway_running=lambda: self.gateway,
         )
         self.store = Store(self.dir)
 
@@ -515,9 +518,95 @@ class YesTest(Base):
         self.assertEqual(s.next_at, "2026-11-07T10:01:00+00:00")
 
 
-class TestStubTest(Base):
-    def test_not_available_yet(self):
-        self.assertIn("not available yet", self.run_cmd("test"))
+class SnoozeTestCommandTest(Base):
+    def test_creates_a_running_one_shot_test_snooze(self):
+        reply = self.run_cmd("test", source=telegram_source())
+        s = self.store.load()[0]
+        self.assertEqual((s.state, s.test, s.text), (ACTIVE, True, "🧪 Snooze test"))
+        self.assertEqual((s.target.platform, s.target.chat_id), ("telegram", "123"))
+        self.assertEqual(s.next_at, NOW.isoformat())
+        self.assertEqual(s.schedule.until, (NOW + timedelta(minutes=2)).isoformat())
+        self.assertEqual(s.confirm, {"kind": "ok", "value": ""})
+        self.assertIn("✅ Gateway running for this profile", reply)
+        self.assertIn("next 15 s", reply)
+        self.assertIn("reply `ok`", reply)
+
+    def test_tick_constant_matches_the_text(self):
+        from snooze import send
+
+        self.assertEqual(echo.TEST_ARRIVES_IN, send.TICK_SECONDS)
+
+    def test_sends_one_reminder_then_misses(self):
+        self.run_cmd("test", source=telegram_source())
+        s = self.store.load()[0]
+        after_first = NOW + timedelta(seconds=15)
+        schedule.after_send(s, after_first)
+        self.assertEqual(schedule.due(s, after_first + timedelta(minutes=1), 10).kind, schedule.NOTHING)
+        self.assertEqual(schedule.due(s, NOW + timedelta(minutes=2), 10).kind, schedule.MISS)
+        self.assertEqual(echo.missed_text(s), echo.TEST_MISSED)
+
+    def test_ok_passes_the_test(self):
+        self.run_cmd("test", source=telegram_source())
+        self.assertEqual(self.run_cmd("ok"), "✅ Test passed: reminders are sent and your replies are received.")
+        self.assertEqual(self.store.load()[0].state, DONE)
+
+    def test_no_test_without_a_gateway(self):
+        self.gateway = False
+        reply = self.run_cmd("test", source=telegram_source())
+        self.assertIn("❌ Gateway not running", reply)
+        self.assertEqual(self.store.load(), [])
+
+    def test_gateway_unknown_still_runs_the_test(self):
+        self.gateway = None
+        reply = self.run_cmd("test", source=telegram_source())
+        self.assertIn("could not check", reply)
+        self.assertEqual(len(self.store.load()), 1)
+
+    def test_goes_to_the_home_channel_from_the_cli(self):
+        reply = self.run_cmd("test")
+        self.assertEqual(self.store.load()[0].target, HOME)
+        self.assertIn("home channel", reply)
+
+    def test_no_target(self):
+        self.home = None
+        self.assertEqual(self.run_cmd("test"), commands.NO_TARGET_TEXT)
+        self.assertEqual(self.store.load(), [])
+
+    def test_words_after_test_are_a_reminder(self):
+        self.run_cmd("test the alarm at 4pm", source=telegram_source())
+        s = self.store.load()[0]
+        self.assertEqual((s.text, s.test), ("test the alarm", False))
+
+
+class GatewayWarningTest(Base):
+    WARNING = echo.GATEWAY_OFF_WARNING
+
+    def test_command_echo_warns_when_the_gateway_is_off(self):
+        self.gateway = False
+        self.assertIn(self.WARNING, self.run_cmd("Send email at 4pm", source=telegram_source()))
+
+    def test_tool_echo_warns_when_the_gateway_is_off(self):
+        self.gateway = False
+        self.env = {"HERMES_SESSION_PLATFORM": "telegram", "HERMES_SESSION_CHAT_ID": "123"}
+        result = json.loads(self.cmds.tool({"text": "Wake up", "first_at": "2026-11-07T16:00"}))
+        self.assertIn(self.WARNING, result["message"])
+
+    def test_no_warning_when_running_or_unknown(self):
+        for state in (True, None):
+            with self.subTest(state=state):
+                self.gateway = state
+                self.assertNotIn(self.WARNING, self.run_cmd("Send email at 4pm", source=telegram_source()))
+
+    def test_running_in_the_gateway_process(self):
+        with mock.patch("snooze.send.in_gateway", return_value=True):
+            self.assertIs(commands.hermes_gateway_running(), True)
+
+    def test_check_errors_give_none(self):
+        with (
+            mock.patch("snooze.send.in_gateway", return_value=False),
+            mock.patch.dict("sys.modules", {"gateway.status": None}),  # makes the import fail
+        ):
+            self.assertIsNone(commands.hermes_gateway_running())
 
 
 class FallThroughTest(Base):
