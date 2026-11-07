@@ -13,8 +13,9 @@ def make(text="Send email to John Doe", **kw):
         text=text,
         created="2026-11-07T10:00:00+00:00",
         target=Target(platform="telegram", chat_id="123", user_id="42"),
-        schedule=Schedule(first_at="2026-11-07T17:00:00+00:00", every="30m",
-                          until="2026-11-07T18:00:00+00:00", tz="Europe/Paris"),
+        schedule=Schedule(
+            first_at="2026-11-07T17:00:00+00:00", every="30m", until="2026-11-07T18:00:00+00:00", tz="Europe/Paris"
+        ),
         confirm={"kind": "word", "word": "ok"},
         then="Draft the reply",
         **kw,
@@ -52,8 +53,14 @@ class RoundTripTest(TmpCase):
         self.assertEqual(self.store.load(), [])
 
     def test_round_trip_all_fields(self):
-        s = make(state=store.ACTIVE, sent_count=3, last_sent_at="2026-11-07T17:30:00+00:00",
-                 next_at="2026-11-07T18:00:00+00:00", last_message_id=99, last_error="boom")
+        s = make(
+            state=store.ACTIVE,
+            sent_count=3,
+            last_sent_at="2026-11-07T17:30:00+00:00",
+            next_at="2026-11-07T18:00:00+00:00",
+            last_message_id=99,
+            last_error="boom",
+        )
         saved = self.store.add(s)
         self.assertEqual(saved.id, 1)
         loaded = Store(self.dir).load()

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from snooze import commands, confirm
 from snooze.commands import Commands
-from snooze.store import (ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, Store, Target)
+from snooze.store import ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, Store, Target
 
 NOW = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)  # 11:00 in Paris
 HOME = Target(platform="telegram", chat_id="999", user_id="999")
@@ -87,9 +87,16 @@ class CreateTest(Base):
     def test_echo_content(self):
         echo = self.run_cmd(self.FULL, source=telegram_source())
         for part in (
-            "Snooze #1", "Send email to John Doe", "today 16:00", "every 10 min", "stops 18:00",
-            "(Europe/Paris)", 'reply "ok"', 'the agent will "close ticket 42"',
-            "Telegram (this chat)", "/snooze cancel 1",
+            "Snooze #1",
+            "Send email to John Doe",
+            "today 16:00",
+            "every 10 min",
+            "stops 18:00",
+            "(Europe/Paris)",
+            'reply "ok"',
+            'the agent will "close ticket 42"',
+            "Telegram (this chat)",
+            "/snooze cancel 1",
         ):
             self.assertIn(part, echo)
 
@@ -476,8 +483,13 @@ class FallThroughTest(Base):
 
 class PendingExpiryTest(unittest.TestCase):
     def snooze(self, state=PENDING, created=NOW):
-        return Snooze(text="x", created=created.isoformat(), target=Target("telegram", "1", "1"),
-                      schedule=Schedule(first_at=NOW.isoformat()), state=state)
+        return Snooze(
+            text="x",
+            created=created.isoformat(),
+            target=Target("telegram", "1", "1"),
+            schedule=Schedule(first_at=NOW.isoformat()),
+            state=state,
+        )
 
     def test_deadline_is_created_plus_ten_minutes(self):
         self.assertEqual(commands.pending_deadline(self.snooze()), NOW + timedelta(minutes=10))
@@ -512,12 +524,20 @@ class ToolTest(Base):
 
     def setUp(self):
         super().setUp()
-        self.env = {"HERMES_SESSION_PLATFORM": "telegram", "HERMES_SESSION_CHAT_ID": "123",
-                    "HERMES_SESSION_USER_ID": "42"}
+        self.env = {
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "123",
+            "HERMES_SESSION_USER_ID": "42",
+        }
 
     def test_creates_a_pending_snooze_with_echo(self):
-        result = self.call(text="Send email to John Doe", first_at="2026-11-07T16:00", every="10m",
-                           until="2026-11-07T18:00", then="close ticket 42")
+        result = self.call(
+            text="Send email to John Doe",
+            first_at="2026-11-07T16:00",
+            every="10m",
+            until="2026-11-07T18:00",
+            then="close ticket 42",
+        )
         self.assertTrue(result["ok"])
         self.assertEqual((result["id"], result["state"]), (1, PENDING))
         self.assertIn("today 16:00", result["message"])
@@ -559,7 +579,13 @@ class ToolTest(Base):
     def test_confirm_values_round_trip_through_match(self):
         self.ctx.config["validate_setup"] = False
         me = {"platform": "telegram", "chat_id": "123", "user_id": "42"}
-        for value, said in (("taken", "taken"), ("contains:sent", "I sent it"), ("any", "hmm"), ("👍", "👍"), ("ok", "ok")):
+        for value, said in (
+            ("taken", "taken"),
+            ("contains:sent", "I sent it"),
+            ("any", "hmm"),
+            ("👍", "👍"),
+            ("ok", "ok"),
+        ):
             with self.subTest(value=value):
                 self.call(text="Wake up", first_at="2026-11-07T16:00", confirm=value)
                 last = sent(self.store.load()[-1:])
@@ -616,8 +642,10 @@ class SettingsTest(unittest.TestCase):
     def test_values_are_read(self):
         ctx = FakeCtx(validate_setup=False, cap_minutes=30, cap_reminders=3, timezone="Asia/Tokyo")
         settings = commands.read_settings(ctx)
-        self.assertEqual((settings.validate_setup, settings.cap_minutes, settings.cap_reminders, settings.timezone),
-                         (False, 30, 3, "Asia/Tokyo"))
+        self.assertEqual(
+            (settings.validate_setup, settings.cap_minutes, settings.cap_reminders, settings.timezone),
+            (False, 30, 3, "Asia/Tokyo"),
+        )
 
     def test_invalid_values_fall_back(self):
         ctx = FakeCtx(validate_setup="maybe", cap_minutes=-5, cap_reminders="lots", timezone="Mars/Base")

@@ -82,7 +82,7 @@ class ConfirmTableTest(unittest.TestCase):
         self.assertEqual(self.confirm("ok any"), p.ConfirmRule("any"))
 
     def test_emoji(self):
-        self.assertEqual(self.confirm("ok \U0001F44D"), p.ConfirmRule("emoji", "\U0001F44D"))
+        self.assertEqual(self.confirm("ok \U0001f44d"), p.ConfirmRule("emoji", "\U0001f44d"))
 
     def test_emoji_with_variation_selector(self):
         self.assertEqual(self.confirm("ok ✔️"), p.ConfirmRule("emoji", "✔️"))

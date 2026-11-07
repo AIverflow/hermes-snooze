@@ -33,11 +33,13 @@ sender
 The matching rules (who can answer, `later`, pass-through, text folding) are
 documented in the README ("Confirming").
 """
+
 import datetime
 import re
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional
+from typing import Any
 
 NONE = "none"
 CONFIRM = "confirm"
@@ -56,8 +58,16 @@ _ACTIVE = "active"
 _PRIVATE_CHATS = {"dm", "private"}
 
 _UNIT_MINUTES = {
-    "m": 1, "min": 1, "mins": 1, "minute": 1, "minutes": 1,
-    "h": 60, "hr": 60, "hrs": 60, "hour": 60, "hours": 60,
+    "m": 1,
+    "min": 1,
+    "mins": 1,
+    "minute": 1,
+    "minutes": 1,
+    "h": 60,
+    "hr": 60,
+    "hrs": 60,
+    "hour": 60,
+    "hours": 60,
 }
 _DURATION = re.compile(r"^(\d+)([a-z]*)$")
 
@@ -65,10 +75,11 @@ _DURATION = re.compile(r"^(\d+)([a-z]*)$")
 @dataclass(frozen=True)
 class Decision:
     """What to do with an inbound message."""
-    action: str = NONE                  # "none" | "confirm" | "later" | "yes"
-    snooze_id: Any = None               # the snooze concerned (None for "none")
-    later_minutes: Optional[int] = None  # only for "later"
-    pass_through: bool = True           # True: let the message reach the agent
+
+    action: str = NONE  # "none" | "confirm" | "later" | "yes"
+    snooze_id: Any = None  # the snooze concerned (None for "none")
+    later_minutes: int | None = None  # only for "later"
+    pass_through: bool = True  # True: let the message reach the agent
 
 
 _NO_MATCH = Decision()
@@ -84,6 +95,7 @@ def _get(obj: Any, name: str, default: Any = None) -> Any:
 
 # ---------------------------------------------------------------- text
 
+
 def normalize(text: Any) -> str:
     """Lower-case, strip punctuation / variation selectors / skin tones, fold emoji variants.
 
@@ -91,7 +103,7 @@ def normalize(text: Any) -> str:
     """
     if text is None:
         return ""
-    out: List[str] = []
+    out: list[str] = []
     for ch in unicodedata.normalize("NFKC", str(text)):
         if ch in _VARIATION_SELECTORS or ch in _SKIN_TONES:
             continue
@@ -107,7 +119,7 @@ def normalize(text: Any) -> str:
     return " ".join("".join(out).split())
 
 
-def _tokens(text: Any) -> List[str]:
+def _tokens(text: Any) -> list[str]:
     return normalize(text).split()
 
 
@@ -116,18 +128,19 @@ def _has_words(tokens: Iterable[str]) -> bool:
     return any(any(c.isalnum() for c in t) for t in tokens)
 
 
-def _find(tokens: List[str], needle: List[str]) -> int:
+def _find(tokens: list[str], needle: list[str]) -> int:
     """Index of the first occurrence of `needle` in `tokens`, or -1."""
     n = len(needle)
     if n == 0:
         return -1
     for i in range(len(tokens) - n + 1):
-        if tokens[i:i + n] == needle:
+        if tokens[i : i + n] == needle:
             return i
     return -1
 
 
 # ---------------------------------------------------------------- confirm rule
+
 
 def _parse_rule(rule: Any):
     """Return (kind, value tokens) for a confirm rule."""
@@ -140,7 +153,7 @@ def _parse_rule(rule: Any):
         raw = rule.strip()
         low = raw.lower()
         if low.startswith("contains:"):
-            kind, value = "contains", raw[len("contains:"):]
+            kind, value = "contains", raw[len("contains:") :]
         elif low in ("", "ok"):
             kind = "ok"
         elif low == "any":
@@ -161,7 +174,7 @@ def _parse_rule(rule: Any):
     return kind, toks
 
 
-def _confirm_match(rule: Any, tokens: List[str]):
+def _confirm_match(rule: Any, tokens: list[str]):
     """Return (matched, pass_through) for a message against a rule."""
     kind, value = _parse_rule(rule)
     if not tokens:
@@ -171,14 +184,14 @@ def _confirm_match(rule: Any, tokens: List[str]):
     if kind == "contains":
         return _find(tokens, value) >= 0, False
     if kind in ("ok", "word"):
-        if tokens[:len(value)] != value:
+        if tokens[: len(value)] != value:
             return False, False
-        return True, _has_words(tokens[len(value):])
+        return True, _has_words(tokens[len(value) :])
     if kind == "emoji":
         i = _find(tokens, value)
         if i < 0:
             return False, False
-        rest = tokens[:i] + tokens[i + len(value):]
+        rest = tokens[:i] + tokens[i + len(value) :]
         return True, _has_words(rest)
     return False, False
 
@@ -189,7 +202,8 @@ def _is_emoji_rule(rule: Any) -> bool:
 
 # ---------------------------------------------------------------- later / yes
 
-def _later(tokens: List[str]):
+
+def _later(tokens: list[str]):
     """If the message is a `later` / `not now` request, return (True, minutes or None)."""
     if tokens[:1] == ["later"]:
         rest = tokens[1:]
@@ -221,6 +235,7 @@ def _default_later(snooze: Any) -> int:
 
 # ---------------------------------------------------------------- who / which
 
+
 def _same(a: Any, b: Any) -> bool:
     return a is not None and b is not None and str(a) == str(b)
 
@@ -230,8 +245,10 @@ def _authorized(snooze: Any, sender: Any, is_reaction: bool) -> bool:
     if target is None or sender is None:
         return False
     t_platform, s_platform = _get(target, "platform"), _get(sender, "platform")
-    if not _same(str(t_platform).lower() if t_platform is not None else None,
-                 str(s_platform).lower() if s_platform is not None else None):
+    if not _same(
+        str(t_platform).lower() if t_platform is not None else None,
+        str(s_platform).lower() if s_platform is not None else None,
+    ):
         return False
     if not _same(_get(target, "chat_id"), _get(sender, "chat_id")):
         return False
@@ -245,7 +262,7 @@ def _authorized(snooze: Any, sender: Any, is_reaction: bool) -> bool:
     return _same(_get(target, "user_id"), _get(sender, "user_id"))
 
 
-def _last_sent(snoozes: List[Any]) -> Optional[Any]:
+def _last_sent(snoozes: list[Any]) -> Any | None:
     sent = [(i, s) for i, s in enumerate(snoozes) if _get(s, "last_sent_at") is not None]
     if not sent:
         return None
@@ -261,8 +278,10 @@ def _state(snooze: Any) -> str:
 
 # ---------------------------------------------------------------- entry point
 
-def match(message: Any, active_snoozes: Iterable[Any], sender: Any,
-          reply_to_id: Any = None, is_reaction: bool = False) -> Decision:
+
+def match(
+    message: Any, active_snoozes: Iterable[Any], sender: Any, reply_to_id: Any = None, is_reaction: bool = False
+) -> Decision:
     """Decide what `message` means. See the module docstring for the input shapes."""
     if is_reaction and not isinstance(message, str):
         message = " ".join(str(m) for m in (message or ()))
@@ -298,8 +317,9 @@ def match(message: Any, active_snoozes: Iterable[Any], sender: Any,
     if active is not None:
         is_later, minutes = _later(tokens)
         if is_later:
-            return Decision(LATER, _get(active, "id"),
-                            minutes if minutes is not None else _default_later(active), False)
+            return Decision(
+                LATER, _get(active, "id"), minutes if minutes is not None else _default_later(active), False
+            )
         ok, extra = _confirm_match(_get(active, "confirm"), tokens)
         if ok:
             return Decision(CONFIRM, _get(active, "id"), None, extra)

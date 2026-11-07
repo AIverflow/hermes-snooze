@@ -4,10 +4,11 @@ Pure module: standard library only, no Hermes imports. The grammar is
 documented in the README ("Writing a snooze"). ``parse`` returns the error
 instead of raising it.
 """
+
 import re
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone, tzinfo as _tzinfo
-from typing import Optional, Union
+from datetime import datetime, time, timedelta, timezone
+from datetime import tzinfo as _tzinfo
 from zoneinfo import ZoneInfo
 
 MIN_DURATION = timedelta(minutes=1)
@@ -36,10 +37,10 @@ class ConfirmRule:
 class Spec:
     text: str
     first_at: datetime
-    every: Optional[timedelta]
-    until: Optional[datetime]
+    every: timedelta | None
+    until: datetime | None
     confirm: ConfirmRule
-    then: Optional[str]
+    then: str | None
     tz: str
 
 
@@ -52,7 +53,7 @@ class ParseError:
         return f"{self.message} Example: {self.example}"
 
 
-def _parse_time(word: str) -> Optional[time]:
+def _parse_time(word: str) -> time | None:
     m = _TIME_RE.match(word.casefold())
     if not m:
         return None
@@ -71,7 +72,7 @@ def _parse_time(word: str) -> Optional[time]:
     return time(hour, minute)
 
 
-def _parse_duration(word: str) -> Optional[timedelta]:
+def _parse_duration(word: str) -> timedelta | None:
     word = word.casefold()
     if not _DURATION_RE.match(word):
         return None
@@ -94,16 +95,17 @@ def _is_emoji(word: str) -> bool:
     return any(ord(c) > 127 for c in word) and not any(c.isalnum() for c in word)
 
 
-def _parse_ok_arg(arg: str) -> Union[ConfirmRule, ParseError]:
+def _parse_ok_arg(arg: str) -> ConfirmRule | ParseError:
     low = arg.casefold()
     if low == "any":
         return ConfirmRule("any")
     if low.startswith("contains:"):
-        value = arg[len("contains:"):]
+        value = arg[len("contains:") :]
         if any(c.isalnum() for c in value):
             return ConfirmRule("contains", value)
-        return ParseError("`ok contains:` needs a word after the colon.",
-                          "/snooze Send the report at 4pm ok contains:sent")
+        return ParseError(
+            "`ok contains:` needs a word after the colon.", "/snooze Send the report at 4pm ok contains:sent"
+        )
     if _is_emoji(arg):
         return ConfirmRule("emoji", arg)
     if any(c.isalnum() for c in arg):
@@ -111,7 +113,7 @@ def _parse_ok_arg(arg: str) -> Union[ConfirmRule, ParseError]:
     return ParseError(f"`ok {arg}` is not a word or an emoji.", EXAMPLE_IN)
 
 
-def parse(text: str, now: datetime, tz: Union[str, _tzinfo]) -> Union[Spec, ParseError]:
+def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
     """Parse the ``/snooze`` argument text.
 
     ``now`` must be an aware datetime. ``tz`` is the user's zone (a ``tzinfo``
@@ -129,10 +131,10 @@ def parse(text: str, now: datetime, tz: Union[str, _tzinfo]) -> Union[Spec, Pars
         return ParseError("Nothing to remind.", EXAMPLE_SHORT)
 
     # `then` takes everything after it.
-    then_text: Optional[str] = None
+    then_text: str | None = None
     for k in range(1, len(toks)):
         if toks[k][0].casefold() == "then":
-            then_text = text[toks[k][2]:].strip()
+            then_text = text[toks[k][2] :].strip()
             if not then_text:
                 return ParseError("`then` needs an action after it.", EXAMPLE_FULL)
             toks = toks[:k]
@@ -141,11 +143,11 @@ def parse(text: str, now: datetime, tz: Union[str, _tzinfo]) -> Union[Spec, Pars
     words = [t[0] for t in toks]
     low = [w.casefold() for w in words]
 
-    at_t: Optional[time] = None
-    in_d: Optional[timedelta] = None
-    every: Optional[timedelta] = None
-    until_t: Optional[time] = None
-    confirm: Optional[ConfirmRule] = None
+    at_t: time | None = None
+    in_d: timedelta | None = None
+    every: timedelta | None = None
+    until_t: time | None = None
+    confirm: ConfirmRule | None = None
 
     # Read clauses from the end; stop at the first one that does not apply.
     end = len(toks)
@@ -181,8 +183,7 @@ def parse(text: str, now: datetime, tz: Union[str, _tzinfo]) -> Union[Spec, Pars
             elif every is not None:
                 break
             if d < MIN_DURATION:
-                return ParseError(f"`{kw} {arg}` is too short: the minimum is 1 minute.",
-                                  EXAMPLE_LONG)
+                return ParseError(f"`{kw} {arg}` is too short: the minimum is 1 minute.", EXAMPLE_LONG)
             if kw == "in":
                 in_d = d
             else:
@@ -200,7 +201,8 @@ def parse(text: str, now: datetime, tz: Union[str, _tzinfo]) -> Union[Spec, Pars
 
     # Short form: `<what> 8am 10m` or `<what> 8am`.
     if at_t is None and in_d is None:
-        def bare_time_at(i: int) -> Optional[time]:
+
+        def bare_time_at(i: int) -> time | None:
             if i < 2:  # keep at least one word of text
                 return None
             if i >= 2 and low[i - 2] in _PREPOSITIONS:
@@ -212,20 +214,18 @@ def parse(text: str, now: datetime, tz: Union[str, _tzinfo]) -> Union[Spec, Pars
             if t is not None:
                 d = _parse_duration(words[end - 1])
                 if d < MIN_DURATION:
-                    return ParseError(f"`{words[end - 1]}` is too short: the minimum is 1 minute.",
-                                      EXAMPLE_SHORT)
+                    return ParseError(f"`{words[end - 1]}` is too short: the minimum is 1 minute.", EXAMPLE_SHORT)
                 at_t, every, end = t, d, end - 2
         if at_t is None:
             t = bare_time_at(end)
             if t is not None:
                 at_t, end = t, end - 1
 
-    what = text[:toks[end - 1][2]].strip() if end > 0 else ""
+    what = text[: toks[end - 1][2]].strip() if end > 0 else ""
     if not what:
         return ParseError("Missing the reminder text.", EXAMPLE_LONG)
     if at_t is None and in_d is None:
-        return ParseError("Missing when to start: add `at <time>` or `in <duration>`.",
-                          EXAMPLE_LONG)
+        return ParseError("Missing when to start: add `at <time>` or `in <duration>`.", EXAMPLE_LONG)
 
     if in_d is not None:
         first_at = now_utc + in_d

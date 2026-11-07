@@ -1,4 +1,5 @@
 """Load the repo root (the plugin folder) as package `snooze`, so tests can do `from snooze import parse`."""
+
 import importlib.util
 import sys
 from pathlib import Path

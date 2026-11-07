@@ -7,6 +7,7 @@ Timestamps are ISO 8601 strings in UTC. The store does not interpret them;
 `schedule.py` does. The fields `every`, `confirm` and `then` are plain JSON
 values owned by the modules that use them.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -16,9 +17,10 @@ import json
 import os
 import tempfile
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
@@ -78,7 +80,7 @@ class Snooze:
         return dataclasses.asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Any) -> "Snooze":
+    def from_dict(cls, data: Any) -> Snooze:
         """Build a record from parsed JSON. Raises StoreError if it is malformed."""
         try:
             if not isinstance(data, dict):
@@ -193,7 +195,7 @@ class Store:
         with self.transaction() as txn:
             txn.snoozes = list(snoozes)
 
-    def sender_lock(self) -> "SenderLock":
+    def sender_lock(self) -> SenderLock:
         return sender_lock(self.data_dir)
 
     # -- file access -------------------------------------------------------

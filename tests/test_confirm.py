@@ -3,11 +3,20 @@ import unittest
 from types import SimpleNamespace
 
 from snooze import confirm
-from snooze.confirm import match, Decision
+from snooze.confirm import Decision, match
 
 
-def snooze(id=1, confirm_rule="ok", state="active", chat="100", user="42", platform="telegram",
-           last_sent_at="2026-11-07T16:00:00", last_message_id="m1", every=10):
+def snooze(
+    id=1,
+    confirm_rule="ok",
+    state="active",
+    chat="100",
+    user="42",
+    platform="telegram",
+    last_sent_at="2026-11-07T16:00:00",
+    last_message_id="m1",
+    every=10,
+):
     return {
         "id": id,
         "state": state,
@@ -52,9 +61,13 @@ class DefaultOk(unittest.TestCase):
 
     def test_object_shapes(self):
         s = SimpleNamespace(
-            id=7, state="active", confirm=None,
+            id=7,
+            state="active",
+            confirm=None,
             target=SimpleNamespace(platform="telegram", chat_id=100, user_id=42),
-            last_sent_at=1.0, last_message_id=5, schedule=SimpleNamespace(every=3),
+            last_sent_at=1.0,
+            last_message_id=5,
+            schedule=SimpleNamespace(every=3),
         )
         sender = SimpleNamespace(platform="telegram", chat_id="100", user_id="42")
         self.assertEqual(match("ok", [s], sender, None).snooze_id, 7)
@@ -166,9 +179,15 @@ class Later(unittest.TestCase):
         self.assertEqual(d.later_minutes, confirm.DEFAULT_LATER_MINUTES)
 
     def test_later_minutes(self):
-        for text, minutes in [("later 30", 30), ("Later 30!", 30), ("later 30m", 30),
-                              ("later 30 min", 30), ("later 1h", 60), ("later 2 hours", 120),
-                              ("not now 20", 20)]:
+        for text, minutes in [
+            ("later 30", 30),
+            ("Later 30!", 30),
+            ("later 30m", 30),
+            ("later 30 min", 30),
+            ("later 1h", 60),
+            ("later 2 hours", 120),
+            ("not now 20", 20),
+        ]:
             with self.subTest(text=text):
                 d = run(text)
                 self.assertEqual((d.action, d.later_minutes, d.pass_through), ("later", minutes, False))
@@ -237,8 +256,7 @@ class WhichSnooze(unittest.TestCase):
         self.assertEqual(run("ok", self.three(), reply_to="m3").snooze_id, 3)
 
     def test_reply_to_id_types(self):
-        s = [snooze(id=1, last_message_id=55), snooze(id=2, last_message_id=56,
-                                                      last_sent_at="2026-11-07T15:00:00")]
+        s = [snooze(id=1, last_message_id=55), snooze(id=2, last_message_id=56, last_sent_at="2026-11-07T15:00:00")]
         self.assertEqual(run("ok", s, reply_to="56").snooze_id, 2)
         self.assertEqual(run("ok", s, reply_to=56).snooze_id, 2)
 
@@ -250,8 +268,10 @@ class WhichSnooze(unittest.TestCase):
         self.assertEqual((d.snooze_id, d.later_minutes), (1, 5))
 
     def test_reply_to_uses_that_snooze_rule(self):
-        s = [snooze(id=1, confirm_rule="taken", last_message_id="m1"),
-             snooze(id=2, last_sent_at="2026-11-07T17:00:00", last_message_id="m2")]
+        s = [
+            snooze(id=1, confirm_rule="taken", last_message_id="m1"),
+            snooze(id=2, last_sent_at="2026-11-07T17:00:00", last_message_id="m2"),
+        ]
         self.assertEqual(run("taken", s, reply_to="m1").snooze_id, 1)
         self.assertEqual(run("taken", s).action, "none")  # last sent is #2, rule ok
 
@@ -306,8 +326,10 @@ class Sender(unittest.TestCase):
 
     def test_other_users_snooze_is_skipped(self):
         # two users, each with their own snooze: the sender only sees theirs
-        s = [snooze(id=1, user="42", last_sent_at="2026-11-07T10:00:00"),
-             snooze(id=2, user="7", chat="200", last_sent_at="2026-11-07T11:00:00")]
+        s = [
+            snooze(id=1, user="42", last_sent_at="2026-11-07T10:00:00"),
+            snooze(id=2, user="7", chat="200", last_sent_at="2026-11-07T11:00:00"),
+        ]
         self.assertEqual(run("ok", s).snooze_id, 1)
 
 
@@ -348,8 +370,10 @@ class Reaction(unittest.TestCase):
                 self.assertEqual(run("👍", s, sender=self.DM, is_reaction=True).action, "none")
 
     def test_reaction_on_reminder_message(self):
-        s = [snooze(id=1, confirm_rule="👍", last_message_id="m1"),
-             snooze(id=2, confirm_rule="👍", last_message_id="m2", last_sent_at="2026-11-07T17:00:00")]
+        s = [
+            snooze(id=1, confirm_rule="👍", last_message_id="m1"),
+            snooze(id=2, confirm_rule="👍", last_message_id="m2", last_sent_at="2026-11-07T17:00:00"),
+        ]
         d = run("👍", s, sender=self.DM, reply_to="m1", is_reaction=True)
         self.assertEqual(d.snooze_id, 1)
 
@@ -391,8 +415,10 @@ class Yes(unittest.TestCase):
         self.assertEqual(run("yes", s).action, "confirm")
 
     def test_reply_to_pending_echo(self):
-        s = [snooze(id=1, state="pending", last_sent_at=None, last_message_id="e1"),
-             snooze(id=2, state="pending", last_sent_at=None, last_message_id="e2")]
+        s = [
+            snooze(id=1, state="pending", last_sent_at=None, last_message_id="e1"),
+            snooze(id=2, state="pending", last_sent_at=None, last_message_id="e2"),
+        ]
         self.assertEqual(run("yes", s, reply_to="e1").snooze_id, 1)
         self.assertEqual(run("yes", s).snooze_id, 2)  # else the most recent in the list
 

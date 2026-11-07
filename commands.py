@@ -14,25 +14,26 @@ A pending snooze that gets no `yes` within `PENDING_TIMEOUT` is not started
 `yes` refuses an expired snooze and marks it "missed". The reminders cap
 (`cap_reminders`) is enforced where reminders are sent.
 """
+
 from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import parse as _parse
 from .parse import ConfirmRule, ParseError, Spec
-from .store import (ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze,
-                    Store, StoreError, Target, Txn)
+from .store import ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, Store, StoreError, Target, Txn
 
 PLUGIN_NAME = "snooze"
 TOOL_NAME = "snooze_create"
 
-DEFAULT_EVERY = timedelta(minutes=10)    # used when the text gives no `every`
+DEFAULT_EVERY = timedelta(minutes=10)  # used when the text gives no `every`
 PENDING_TIMEOUT = timedelta(minutes=10)  # time the user has to reply `yes`
 
 DEFAULT_VALIDATE_SETUP = True
@@ -40,10 +41,23 @@ DEFAULT_CAP_MINUTES = 120
 DEFAULT_CAP_REMINDERS = 10
 
 # Session platforms that are not a chat the reminder could be sent to.
-NON_CHAT_PLATFORMS = frozenset({
-    "", "api_server", "cli", "codex", "desktop", "gateway", "kanban", "local",
-    "msgraph_webhook", "tool", "tui", "webhook", "acp",
-})
+NON_CHAT_PLATFORMS = frozenset(
+    {
+        "",
+        "api_server",
+        "cli",
+        "codex",
+        "desktop",
+        "gateway",
+        "kanban",
+        "local",
+        "msgraph_webhook",
+        "tool",
+        "tui",
+        "webhook",
+        "acp",
+    }
+)
 
 SUBCOMMANDS = ("list", "ok", "later", "cancel", "yes", "test")
 
@@ -63,8 +77,10 @@ HELP = (
     "Other commands: list, ok [id], later [minutes] [id], cancel <id>, yes [id], test"
 )
 
-NO_TARGET_TEXT = ("No chat to send reminders to: run this from a chat (Telegram, Discord, ...), "
-                  "or set a home channel for the profile. Nothing was set.")
+NO_TARGET_TEXT = (
+    "No chat to send reminders to: run this from a chat (Telegram, Discord, ...), "
+    "or set a home channel for the profile. Nothing was set."
+)
 
 OUT_OF_RANGE_TEXT = "⚠️ A date or number is out of range. Nothing was set."
 
@@ -84,6 +100,7 @@ class Settings:
 
 def read_settings(ctx: Any) -> Settings:
     """Read the plugin config through `ctx.get_config(key, default)`, with defaults for anything missing or invalid."""
+
     def get(key: str, default: Any) -> Any:
         try:
             return ctx.get_config(key, default)
@@ -158,7 +175,7 @@ def resolve_timezone(value: Any) -> str:
 # -- pending snoozes: the `yes` window -----------------------------------------
 
 
-def pending_deadline(snooze: Snooze) -> Optional[datetime]:
+def pending_deadline(snooze: Snooze) -> datetime | None:
     """When a pending snooze stops waiting for `yes` (creation + `PENDING_TIMEOUT`), or None if `created` is unreadable."""
     created = _from_iso(snooze.created)
     return created + PENDING_TIMEOUT if created else None
@@ -187,7 +204,7 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _from_iso(value: Any) -> Optional[datetime]:
+def _from_iso(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
@@ -225,7 +242,7 @@ def format_minutes(minutes: Any) -> str:
     return " ".join(parts) or "0 min"
 
 
-def format_when(moment: datetime, zone_name: str, now: datetime, relative_to: Optional[datetime] = None) -> str:
+def format_when(moment: datetime, zone_name: str, now: datetime, relative_to: datetime | None = None) -> str:
     """Local time of `moment`: "today 16:00", "tomorrow 08:00", "Sat 8 Nov 08:00".
 
     With `relative_to`, a moment on the same local day is just "16:00".
@@ -248,12 +265,12 @@ def _platform_label(platform: str) -> str:
     return _PLATFORM_LABELS.get(platform.lower(), platform.title())
 
 
-def _parse_id(token: str) -> Optional[int]:
+def _parse_id(token: str) -> int | None:
     token = token.lstrip("#")
     return int(token) if token.isdigit() else None
 
 
-def _single_token_duration(text: str, now: datetime) -> Optional[timedelta]:
+def _single_token_duration(text: str, now: datetime) -> timedelta | None:
     """A duration such as "30m" or "1h30m" read by the parser's own rules (minimum 1 minute), else None."""
     if len(text.split()) != 1:
         return None
@@ -263,7 +280,7 @@ def _single_token_duration(text: str, now: datetime) -> Optional[timedelta]:
     return None
 
 
-def _minutes_arg(token: str, now: datetime) -> Optional[float]:
+def _minutes_arg(token: str, now: datetime) -> float | None:
     """`later` delay: a bare number is minutes, or a duration such as 30m / 1h. None if invalid or under a minute."""
     if token.isdigit():
         return int(token) if int(token) >= 1 else None
@@ -274,7 +291,7 @@ def _minutes_arg(token: str, now: datetime) -> Optional[float]:
 _BAD_CONFIRM = "confirm must be one word, an emoji, `any` or `contains:<word>`."
 
 
-def _confirm_rule(value: Any, now: datetime) -> "ConfirmRule | str":
+def _confirm_rule(value: Any, now: datetime) -> ConfirmRule | str:
     """A ConfirmRule from the tool's `confirm` value, or an error message."""
     if isinstance(value, dict):
         kind, text = str(value.get("kind") or "ok").lower(), str(value.get("value") or "")
@@ -300,6 +317,7 @@ def _confirm_rule(value: Any, now: datetime) -> "ConfirmRule | str":
 def hermes_data_dir() -> Path:
     """The plugin's data directory for the active profile."""
     from plugins.plugin_storage import plugin_data_dir
+
     return plugin_data_dir(PLUGIN_NAME)
 
 
@@ -307,15 +325,17 @@ def hermes_session_env(name: str) -> str:
     """A `HERMES_SESSION_*` value of the current session ("" if unset)."""
     try:
         from gateway.session_context import get_session_env
+
         return get_session_env(name, "")
     except Exception:
         return os.environ.get(name, "")
 
 
-def hermes_home_target() -> Optional[Target]:
+def hermes_home_target() -> Target | None:
     """The first home channel set in the profile, or None."""
     try:
         from gateway.config import load_gateway_config
+
         config = load_gateway_config()
         for platform, platform_config in config.platforms.items():
             home = getattr(platform_config, "home_channel", None)
@@ -332,7 +352,7 @@ def hermes_home_target() -> Optional[Target]:
     return None
 
 
-def target_from_source(source: Any) -> Optional[Target]:
+def target_from_source(source: Any) -> Target | None:
     """The chat a gateway command came from, or None for the CLI / TUI / Desktop (no source)."""
     if source is None:
         return None
@@ -383,7 +403,7 @@ def render_echo(snooze: Snooze, now: datetime, where: str, capped: bool, cap_rem
         f"⏰ Snooze #{snooze.id} {'ready, not started' if pending else 'set'}",
         f"What:     {snooze.text}",
         f"When:     {', '.join(when)} ({zone})",
-        f"Stop it:  {_stop_text(snooze.confirm)} (or \"later 30\" to push it back)",
+        f'Stop it:  {_stop_text(snooze.confirm)} (or "later 30" to push it back)',
     ]
     if snooze.then:
         lines.append(f'Then:     the agent will "{snooze.then}" and tell you the result')
@@ -409,9 +429,9 @@ class Commands:
         self,
         ctx: Any,
         *,
-        data_dir: Callable[[], "str | os.PathLike"] = hermes_data_dir,
+        data_dir: Callable[[], str | os.PathLike] = hermes_data_dir,
         now: Callable[[], datetime] = _utcnow,
-        home_target: Callable[[], Optional[Target]] = hermes_home_target,
+        home_target: Callable[[], Target | None] = hermes_home_target,
         session_env: Callable[[str], str] = hermes_session_env,
     ):
         self._ctx = ctx
@@ -461,7 +481,7 @@ class Commands:
                 return f"⚠️ {parsed.message}\nExample: {parsed.example}\nNothing was set."
         return self._create_from_spec(parsed, *self._command_target(source))
 
-    def _parse(self, text: str) -> "Spec | ParseError":
+    def _parse(self, text: str) -> Spec | ParseError:
         return _parse.parse(text, self._now(), read_settings(self._ctx).timezone)
 
     def _store(self) -> Store:
@@ -469,13 +489,13 @@ class Commands:
 
     # -- create ----------------------------------------------------------------
 
-    def _command_target(self, source: Any) -> "tuple[Optional[Target], str]":
+    def _command_target(self, source: Any) -> tuple[Target | None, str]:
         target = target_from_source(source)
         if target is not None:
             return target, "this chat"
         return self._home_target(), "home channel"
 
-    def _tool_target(self) -> "tuple[Optional[Target], str]":
+    def _tool_target(self) -> tuple[Target | None, str]:
         platform = self._session_env("HERMES_SESSION_PLATFORM").strip().lower()
         chat_id = self._session_env("HERMES_SESSION_CHAT_ID").strip()
         if platform not in NON_CHAT_PLATFORMS and chat_id:
@@ -483,7 +503,7 @@ class Commands:
             return Target(platform=platform, chat_id=chat_id, user_id=user_id or None), "this chat"
         return self._home_target(), "home channel"
 
-    def _add(self, spec: Spec, target: Target) -> "tuple[Snooze, bool, Settings, datetime]":
+    def _add(self, spec: Spec, target: Target) -> tuple[Snooze, bool, Settings, datetime]:
         """Store a new snooze for `spec`. Returns the record, whether its stop time is the cap, the settings, and now."""
         settings = read_settings(self._ctx)
         now = self._now()
@@ -507,7 +527,7 @@ class Commands:
         )
         return self._store().add(record), capped, settings, now
 
-    def _create_from_spec(self, spec: Spec, target: Optional[Target], where: str) -> str:
+    def _create_from_spec(self, spec: Spec, target: Target | None, where: str) -> str:
         if target is None:
             return NO_TARGET_TEXT
         record, capped, settings, now = self._add(spec, target)
@@ -541,7 +561,9 @@ class Commands:
         if args.get("every") not in (None, ""):
             every = self._tool_every(args["every"], now)
             if every is None:
-                return {"error": "every must be a number of minutes or a duration such as 10m or 1h30m (minimum 1 minute)."}
+                return {
+                    "error": "every must be a number of minutes or a duration such as 10m or 1h30m (minimum 1 minute)."
+                }
 
         rule = _confirm_rule(args.get("confirm"), now)
         if isinstance(rule, str):
@@ -554,7 +576,9 @@ class Commands:
         if target is None:
             return {"error": NO_TARGET_TEXT}
 
-        spec = Spec(text=text, first_at=first_at, every=every, until=until, confirm=rule, then=then, tz=settings.timezone)
+        spec = Spec(
+            text=text, first_at=first_at, every=every, until=until, confirm=rule, then=then, tz=settings.timezone
+        )
         record, capped, settings, now = self._add(spec, target)
         started = record.state == ACTIVE
         return {
@@ -562,13 +586,18 @@ class Commands:
             "id": record.id,
             "state": record.state,
             "message": render_echo(record, now, where, capped, settings.cap_reminders),
-            "note": ("Show `message` to the user as it is. "
-                     + ("The snooze is running." if started else
-                        "It has NOT started: the user must reply `yes` (nothing is sent before).")),
+            "note": (
+                "Show `message` to the user as it is. "
+                + (
+                    "The snooze is running."
+                    if started
+                    else "It has NOT started: the user must reply `yes` (nothing is sent before)."
+                )
+            ),
         }
 
     @staticmethod
-    def _tool_time(value: Any, name: str, zone: tzinfo) -> "datetime | str | None":
+    def _tool_time(value: Any, name: str, zone: tzinfo) -> datetime | str | None:
         """An ISO 8601 string as an aware UTC datetime; None if absent; an error message (str) if invalid."""
         if value in (None, ""):
             return None
@@ -581,7 +610,7 @@ class Commands:
         return moment.astimezone(timezone.utc)
 
     @staticmethod
-    def _tool_every(value: Any, now: datetime) -> Optional[timedelta]:
+    def _tool_every(value: Any, now: datetime) -> timedelta | None:
         if isinstance(value, bool):
             return None
         if isinstance(value, (int, float)):
@@ -595,7 +624,7 @@ class Commands:
     # -- subcommands -----------------------------------------------------------
     # Each returns the reply, or None when the arguments do not fit its shape.
 
-    def _cmd_list(self, rest: list) -> Optional[str]:
+    def _cmd_list(self, rest: list) -> str | None:
         if rest:
             return None
         now = self._now()
@@ -621,12 +650,12 @@ class Commands:
             lines.append(f"#{s.id} {s.text} — {detail}")
         return "\n".join(lines)
 
-    def _cmd_test(self, rest: list) -> Optional[str]:
+    def _cmd_test(self, rest: list) -> str | None:
         if rest:
             return None
         return "🧪 `/snooze test` is not available yet."
 
-    def _cmd_ok(self, rest: list) -> Optional[str]:
+    def _cmd_ok(self, rest: list) -> str | None:
         sid = self._optional_id(rest)
         if sid is False:
             return None
@@ -640,7 +669,7 @@ class Commands:
 
         return self._store().update(run)
 
-    def _cmd_later(self, rest: list) -> Optional[str]:
+    def _cmd_later(self, rest: list) -> str | None:
         if len(rest) > 2:
             return None
         now = self._now()
@@ -666,7 +695,7 @@ class Commands:
 
         return self._store().update(run)
 
-    def _cmd_cancel(self, rest: list) -> Optional[str]:
+    def _cmd_cancel(self, rest: list) -> str | None:
         sid = _parse_id(rest[0]) if len(rest) == 1 else None
         if sid is None:
             return None
@@ -682,7 +711,7 @@ class Commands:
 
         return self._store().update(run)
 
-    def _cmd_yes(self, rest: list) -> Optional[str]:
+    def _cmd_yes(self, rest: list) -> str | None:
         sid = self._optional_id(rest)
         if sid is False:
             return None
@@ -705,7 +734,7 @@ class Commands:
     # -- picking a snooze --------------------------------------------------------
 
     @staticmethod
-    def _optional_id(rest: list) -> "Optional[int] | bool":
+    def _optional_id(rest: list) -> int | None | bool:
         """None for no id, the id, or False when the arguments are not `[id]`."""
         if not rest:
             return None
@@ -715,7 +744,7 @@ class Commands:
         return sid if sid is not None else False
 
     @staticmethod
-    def _select(txn: Txn, sid: Optional[int], wanted: str) -> "tuple[Optional[Snooze], Optional[str]]":
+    def _select(txn: Txn, sid: int | None, wanted: str) -> tuple[Snooze | None, str | None]:
         """The snooze to act on and, if there is none, the reply that explains why.
 
         With an id, any snooze is found and one in the wrong state is explained.
@@ -729,8 +758,7 @@ class Commands:
             if s.state == wanted:
                 return s, None
             if s.state == PENDING:
-                return None, (f"Snooze #{sid} has not started: reply `yes` to start it "
-                              f"(or `/snooze cancel {sid}`).")
+                return None, (f"Snooze #{sid} has not started: reply `yes` to start it (or `/snooze cancel {sid}`).")
             if s.state == ACTIVE:
                 return None, f"Snooze #{sid} is already running."
             return None, f"Snooze #{sid} is already {s.state}."
@@ -756,12 +784,30 @@ TOOL_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "text": {"type": "string", "description": "What to remind the user about, for example 'Send email to John Doe'."},
-            "first_at": {"type": "string", "description": "When the first reminder is sent: ISO 8601 date and time in the user's local time, for example 2026-11-07T16:00."},
-            "every": {"type": "string", "description": "Repeat interval: minutes as a number, or a duration such as '10m' or '1h30m'. Minimum 1 minute. Default 10 minutes."},
-            "until": {"type": "string", "description": "Stop time, ISO 8601, after first_at. Omit to use the plugin's default cap."},
-            "confirm": {"type": "string", "description": "How the user confirms: 'ok' (default), a word, an emoji, 'any' (any message) or 'contains:<word>'."},
-            "then": {"type": "string", "description": "Optional action for the agent to do after the user confirms, for example 'close ticket 42'."},
+            "text": {
+                "type": "string",
+                "description": "What to remind the user about, for example 'Send email to John Doe'.",
+            },
+            "first_at": {
+                "type": "string",
+                "description": "When the first reminder is sent: ISO 8601 date and time in the user's local time, for example 2026-11-07T16:00.",
+            },
+            "every": {
+                "type": "string",
+                "description": "Repeat interval: minutes as a number, or a duration such as '10m' or '1h30m'. Minimum 1 minute. Default 10 minutes.",
+            },
+            "until": {
+                "type": "string",
+                "description": "Stop time, ISO 8601, after first_at. Omit to use the plugin's default cap.",
+            },
+            "confirm": {
+                "type": "string",
+                "description": "How the user confirms: 'ok' (default), a word, an emoji, 'any' (any message) or 'contains:<word>'.",
+            },
+            "then": {
+                "type": "string",
+                "description": "Optional action for the agent to do after the user confirms, for example 'close ticket 42'.",
+            },
         },
         "required": ["text", "first_at"],
         "additionalProperties": False,

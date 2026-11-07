@@ -1,0 +1,9 @@
+line-length = 120
+target-version = "py310"
+
+[lint]
+# E/F: pycodestyle errors and pyflakes. I: import order. B: likely bugs.
+# UP: modern syntax. SIM: needlessly complex code.
+select = ["E", "F", "I", "B", "UP", "SIM"]
+# Nested `with` is easier to read for assertRaises in tests.
+ignore = ["SIM117"]
