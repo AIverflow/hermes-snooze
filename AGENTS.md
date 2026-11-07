@@ -24,6 +24,6 @@ The repo root is the plugin folder.
 
 All user-facing documentation lives in `README.md`. Code comments and docstrings explain the code, not the features: link to the README instead of repeating it.
 
-## Tests
+## Tests and lint
 
-`python3 -m unittest discover -s tests -t .` from the repo root. Must pass before a commit.
+Commands are in the README ("Development"). Tests and Ruff must pass before a commit; the Ruff rules are in `ruff.toml`.

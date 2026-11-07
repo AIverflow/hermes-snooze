@@ -157,7 +157,9 @@ Snoozes are stored per profile in the plugin data directory:
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .
+python3 -m unittest discover -s tests -t .   # tests
+ruff check .                                 # lint (rules in ruff.toml)
+ruff format .                                # format
 ```
 
 Code layout and conventions: [AGENTS.md](AGENTS.md).
