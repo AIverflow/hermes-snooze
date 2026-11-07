@@ -135,8 +135,9 @@ class Hooks:
 
     async def pre_gateway_dispatch(self, event: Any = None, gateway: Any = None, **_context: Any) -> dict | None:
         """Hermes hook: `{"action": "skip"}` for a pure answer, None to let the message through."""
-        # Fallback start: `register()` normally hops onto the gateway loop (send.start_timer), but if that
-        # loop was not ready then, the first message starts the timer from here, on the loop. Idempotent.
+        # Fallback start: `register()` starts the timer (or a waiter thread that does, once the gateway loop
+        # is up). Should that not have happened yet, the first message starts it from here, on the loop,
+        # and the waiter stands down. Idempotent.
         try:
             self._ensure_timer()
         except Exception:

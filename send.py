@@ -11,9 +11,12 @@ Hermes imports stay inside functions: the package loads without Hermes.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import sys
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -222,58 +225,171 @@ class Timer:
 
 
 # One timer per data directory (= per profile) in this process: `register()` and the first gateway
-# hook call may both ask for it. Keys are `str(data_dir)`.
+# hook call may both ask for it. Keys are `str(data_dir)`. A value is a task or future, or a
+# `_PendingTimer` while a waiter thread is still looking for the gateway loop.
 _timers: dict[str, Any] = {}
+
+WAIT_TIMEOUT_SECONDS = 120
+WAIT_POLL_SECONDS = 1.0
+
+
+def _gateway_loop_state() -> tuple[asyncio.AbstractEventLoop | None, str]:
+    """The gateway's own event loop if it is up, else (None, why not)."""
+    module = sys.modules.get("gateway.run")
+    ref = getattr(module, "_gateway_runner_ref", None)
+    runner = ref() if ref is not None else None
+    if runner is None:
+        return None, "no gateway runner"
+    loop = getattr(runner, "_gateway_loop", None)
+    if loop is None:
+        return None, "_gateway_loop is None"
+    if loop.is_closed():
+        return None, "loop closed"
+    if not loop.is_running():
+        return None, "loop not running"
+    return loop, ""
 
 
 def gateway_loop() -> asyncio.AbstractEventLoop | None:
     """The gateway's own event loop if it is up, else None.
 
-    The runner stores it in `_gateway_loop` before it loads the plugins (gateway/run_startup.py
-    `_start_log_startup_environment`, then `_start_recover_previous_run`), and Hermes itself
-    schedules onto it from other threads (gateway/run_plugin_injection.py).
+    Hermes itself schedules onto it from other threads (gateway/run_plugin_injection.py). It is
+    not necessarily up while `register()` runs: see `start_timer`.
     """
-    module = sys.modules.get("gateway.run")
-    ref = getattr(module, "_gateway_runner_ref", None)
-    runner = ref() if ref is not None else None
-    loop = getattr(runner, "_gateway_loop", None)
-    if loop is None or loop.is_closed() or not loop.is_running():
-        return None
-    return loop
+    return _gateway_loop_state()[0]
 
 
-def start_timer(ctx: Any) -> bool:
+class _PendingTimer:
+    """Stands in `_timers` while a waiter thread looks for the gateway loop; it quacks like a task.
+
+    One of three things ends the wait, and the lock makes them exclusive: the waiter hands the timer
+    over (`claim`), the first-message fallback starts its own on the loop (`supersede`), or the waiter
+    gives up (`finish`). `done()` is False while the waiter may still start the timer.
+    """
+
+    _WAITING, _CLAIMED, _SUPERSEDED, _FINISHED = range(4)
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state = self._WAITING
+        self.superseded = threading.Event()  # wakes the waiter's sleep
+
+    def claim(self) -> bool:
+        """The waiter is about to schedule the timer. False if the fallback got there first."""
+        with self._lock:
+            if self._state != self._WAITING:
+                return False
+            self._state = self._CLAIMED
+            return True
+
+    def supersede(self) -> bool:
+        """The fallback starts the timer itself. False if the waiter already claimed the job."""
+        with self._lock:
+            if self._state != self._WAITING:
+                return False
+            self._state = self._SUPERSEDED
+            self.superseded.set()
+            return True
+
+    def finish(self) -> None:
+        with self._lock:
+            if self._state != self._SUPERSEDED:
+                self._state = self._FINISHED
+
+    def done(self) -> bool:
+        return self._state in (self._SUPERSEDED, self._FINISHED)
+
+
+def _wait_and_hand_over(
+    key: str,
+    pending: _PendingTimer,
+    coro: Any,
+    timeout: float,
+    poll: float,
+    reason: str,
+) -> None:
+    """Waiter thread body: poll until the gateway loop is up, then schedule `coro` on it.
+
+    Closes `coro` on every path that does not schedule it, and always ends `pending`, so a later
+    `start_timer` can retry after a failure or a give-up.
+    """
+    handed = False
+    try:
+        logger.info("snooze timer: waiting for the gateway loop (%s)", reason)
+        started = time.monotonic()
+        while True:
+            if pending.superseded.is_set():
+                logger.info("snooze timer: waiter stopped, the timer was started from the loop")
+                return
+            loop, reason = _gateway_loop_state()
+            if loop is not None:
+                break
+            waited = time.monotonic() - started
+            if waited >= timeout:
+                logger.info("snooze timer: gave up waiting for the gateway loop after %.0fs (%s)", waited, reason)
+                return
+            pending.superseded.wait(min(poll, timeout - waited))
+        if not pending.claim():
+            logger.info("snooze timer: waiter stopped, the timer was started from the loop")
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+        except Exception:  # a loop closed since the check above
+            logger.warning("snooze timer: not started (scheduling failed)", exc_info=True)
+            return
+        handed = True
+        if _timers.get(key) is pending:
+            _timers[key] = future
+        logger.info("snooze timer: started on the gateway loop (waited %.0fs)", time.monotonic() - started)
+    except Exception:
+        logger.exception("snooze timer: waiter failed")
+    finally:
+        if not handed:
+            coro.close()
+            if _timers.get(key) is pending:
+                del _timers[key]
+        pending.finish()
+
+
+def start_timer(ctx: Any, *, wait_timeout: float = WAIT_TIMEOUT_SECONDS, wait_poll: float = WAIT_POLL_SECONDS) -> bool:
     """Start the timer loop for the active profile. True if it was started by this call.
 
     Only a gateway process runs it: it has the live adapters and gets the replies, and a CLI or
     Desktop process that held the lock would keep the gateway from sending. The profile is the
     active one (data directory and credentials the task inherits), so call it inside its scope.
-    Idempotent: a profile that already has a live timer task gets no second one.
+    Idempotent: a profile that already has a live timer task, or a waiter, gets no second one.
 
-    Two routes. With a running loop in this thread, `ctx.spawn_task`: Hermes supervises the task and
+    Three routes. With a running loop in this thread, `ctx.spawn_task`: Hermes supervises the task and
     cancels it on unload. Hermes runs `register()` on a plugin-load worker thread that has no loop
     (hermes_cli/plugins_loader.py `run_with_load_deadline`), so there the task is handed to the
     gateway's loop with `run_coroutine_threadsafe`. That call copies this thread's contextvars
-    (`call_soon_threadsafe` with no context), so the task keeps the profile scope. If the gateway loop
-    is not up either, the first `pre_gateway_dispatch` call starts the timer: see `hooks.Hooks`.
+    (`call_soon_threadsafe` with no context), so the task keeps the profile scope. The gateway loop
+    is not always up yet at that point (live finding: `_gateway_loop` unset or not running), so
+    then a short-lived waiter thread polls for it and does the hand-over; this call returns False.
+    A `start_timer` call that runs on a loop while a waiter pends (the first-message fallback in
+    `hooks.Hooks`) takes over and the waiter stands down.
     """
     if not in_gateway():
         logger.info("snooze timer: not started (not in the gateway)")
         return False
     data_dir = hermes_data_dir()
     key = str(data_dir)
-    if not may_start(_timers.get(key)):
-        logger.debug("snooze timer: already running")
-        return False
+    existing = _timers.get(key)
     try:
         asyncio.get_running_loop()
         on_this_loop = True
     except RuntimeError:
         on_this_loop = False
-    loop = None if on_this_loop else gateway_loop()
-    if not on_this_loop and loop is None:
-        logger.info("snooze timer: not started (gateway loop not ready)")
+    if on_this_loop and isinstance(existing, _PendingTimer):
+        if not existing.supersede():
+            logger.debug("snooze timer: the waiter is already starting it")
+            return False
+        logger.info("snooze timer: starting from the loop, the waiter stands down")
+        existing = None
+    if not may_start(existing):
+        logger.debug("snooze timer: already running")
         return False
+    loop, reason = (None, "") if on_this_loop else _gateway_loop_state()
     timer = Timer(
         Store(data_dir),
         HermesSender(),
@@ -282,6 +398,9 @@ def start_timer(ctx: Any) -> bool:
         is_paused=hermes_is_paused,
     )
     coro = timer.run()
+    if not on_this_loop and loop is None:
+        logger.info("snooze timer: gateway loop not ready (%s)", reason)
+        return _start_waiter(key, coro, wait_timeout, wait_poll, reason)
     try:
         if loop is None:
             _timers[key] = ctx.spawn_task(coro, name="snooze:timer")
@@ -293,6 +412,27 @@ def start_timer(ctx: Any) -> bool:
         return False
     logger.info("snooze timer: started" if loop is None else "snooze timer: started on the gateway loop")
     return True
+
+
+def _start_waiter(key: str, coro: Any, timeout: float, poll: float, reason: str) -> bool:
+    """Record a pending marker and start the waiter thread. Always False: nothing is running yet."""
+    pending = _PendingTimer()
+    _timers[key] = pending  # before the thread starts: a second call must see it
+    # A plain thread does not inherit contextvars, and the profile scope (data dir, credentials) lives there.
+    scope = contextvars.copy_context()
+    thread = threading.Thread(
+        target=scope.run,
+        args=(_wait_and_hand_over, key, pending, coro, timeout, poll, reason),
+        name="snooze-timer-wait",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:
+        coro.close()
+        del _timers[key]
+        logger.warning("snooze timer: not started (waiter thread failed)", exc_info=True)
+    return False
 
 
 def may_start(task: Any) -> bool:

@@ -175,7 +175,7 @@ Snoozes are stored per profile in the plugin data directory:
 
 | What | Detail |
 |---|---|
-| Timer | One task in the gateway, every 15 seconds, started when the gateway loads the plugin (the first inbound message is only a fallback). It sends due reminders through Hermes's own send path (no LLM call). |
+| Timer | One task in the gateway, every 15 seconds, started when the gateway loads the plugin, within a few seconds of the gateway loop coming up (the first inbound message is only a fallback). It sends due reminders through Hermes's own send path (no LLM call). |
 | Hooks | `pre_gateway_dispatch` and `gateway_platform_event` see every inbound gateway message and Telegram reaction before the agent. They only act on replies to a running snooze; all other messages pass untouched. |
 | Own messages | Reminders, `✅ Done`, `⌛ Missed` and `then` status lines, sent to the chat the snooze was created in. |
 | Reads outside its data | The Hermes pause flag, whether a gateway is running, and the profile's home channel (for snoozes made from the CLI). Read-only. |

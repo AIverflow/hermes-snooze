@@ -347,6 +347,14 @@ def in_loop(fn):
     return asyncio.run(main())
 
 
+def join_waiters(timeout=5):
+    """Wait for every `snooze-timer-wait` thread to end."""
+    for thread in threading.enumerate():
+        if thread.name == "snooze-timer-wait":
+            thread.join(timeout)
+            assert not thread.is_alive()
+
+
 class StartTest(unittest.TestCase):
     class Ctx:
         def __init__(self, error=None):
@@ -373,7 +381,7 @@ class StartTest(unittest.TestCase):
         self.hop_error = None
 
     def gateway(self, running=True, loop=None):
-        runner = types.SimpleNamespace(_gateway_loop=loop)
+        self.runner = runner = types.SimpleNamespace(_gateway_loop=loop)
         module = types.ModuleType("gateway.run")
         module._gateway_runner_ref = lambda: runner if running else None
         return mock.patch.dict(sys.modules, {"gateway": types.ModuleType("gateway"), "gateway.run": module})
@@ -455,15 +463,170 @@ class StartTest(unittest.TestCase):
             self.assertTrue(send.start_timer(ctx))
             self.assertEqual(len(self.hops), 2)
 
-    def test_no_gateway_loop_means_not_started(self):
-        for loop in (None, FakeLoop(closed=True), FakeLoop(running=False)):
-            with self.subTest(loop=loop):
+    def test_a_loop_that_is_not_ready_is_logged_with_its_reason(self):
+        cases = [
+            (None, "_gateway_loop is None"),
+            (FakeLoop(closed=True), "loop closed"),
+            (FakeLoop(running=False), "loop not running"),
+        ]
+        for loop, reason in cases:
+            with self.subTest(reason=reason):
                 ctx = self.Ctx()
                 with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=loop), self.data_dir(tmp):
                     with self.fake_hop(), self.assertLogs("snooze.send", "INFO") as logs:
-                        self.assertFalse(send.start_timer(ctx))
-                self.assertIn("gateway loop not ready", logs.output[0])
+                        self.assertFalse(send.start_timer(ctx, wait_timeout=0.02, wait_poll=0.005))
+                        join_waiters()
+                self.assertIn(f"gateway loop not ready ({reason})", logs.output[0])
+                self.assertTrue(any("waiting for the gateway loop" in line for line in logs.output))
+                self.assertTrue(any("gave up" in line and reason in line for line in logs.output))
                 self.assertEqual((ctx.spawned, self.hops, send._timers), ([], [], {}))
+                send._timers.clear()
+
+    def test_no_runner_is_a_reason_too(self):
+        module = types.ModuleType("gateway.run")
+        module._gateway_runner_ref = lambda: None
+        with mock.patch.dict(sys.modules, {"gateway.run": module}):
+            self.assertEqual(send._gateway_loop_state(), (None, "no gateway runner"))
+
+    def start_with_waiter(self, ctx, tmp, **kwargs):
+        """Start with a loop that is not up; return the pending marker the waiter thread works for."""
+        self.assertFalse(send.start_timer(ctx, wait_poll=0.005, **kwargs))
+        self.assertEqual(len(send._timers), 1)
+        return next(iter(send._timers.values()))
+
+    def test_a_waiter_hands_the_timer_over_when_the_loop_comes_up(self):
+        ctx, loop = self.Ctx(), FakeLoop(running=False)
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=loop), self.data_dir(tmp), self.fake_hop():
+            with self.assertLogs("snooze.send", "INFO") as logs:
+                pending = self.start_with_waiter(ctx, tmp, wait_timeout=10)
+                self.assertFalse(pending.done())
+                self.assertEqual(self.hops, [])
+                loop.running = True
+                join_waiters()
+            self.assertEqual([hop_loop for _, hop_loop in self.hops], [loop])
+            self.assertIs(send._timers[str(tmp)], self.tasks[0])
+            self.assertEqual(ctx.spawned, [])
+        self.assertTrue(any("started on the gateway loop (waited " in line for line in logs.output))
+
+    def test_a_second_start_while_the_waiter_pends_starts_nothing(self):
+        ctx, loop = self.Ctx(), FakeLoop(running=False)
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=loop), self.data_dir(tmp), self.fake_hop():
+            with self.assertLogs("snooze.send", "INFO"):
+                pending = self.start_with_waiter(ctx, tmp, wait_timeout=10)
+                self.assertFalse(send.start_timer(ctx, wait_poll=0.005))  # same thread, no loop here
+                self.assertIs(send._timers[str(tmp)], pending)
+                self.assertEqual([t.name for t in threading.enumerate()].count("snooze-timer-wait"), 1)
+                loop.running = True
+                join_waiters()
+                self.assertFalse(send.start_timer(ctx))  # the hand-over is a live timer now
+            self.assertEqual(len(self.hops), 1)
+
+    def test_a_waiter_that_gives_up_closes_the_coroutine_and_a_later_call_retries(self):
+        ctx, loop = self.Ctx(), FakeLoop(running=False)
+        seen = []
+        original = send.Timer.run
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            self.gateway(loop=loop),
+            self.data_dir(tmp),
+            self.fake_hop(),
+            mock.patch.object(send.Timer, "run", lambda timer: seen.append(original(timer)) or seen[-1]),
+            self.assertLogs("snooze.send", "INFO"),
+        ):
+            pending = self.start_with_waiter(ctx, tmp, wait_timeout=0.03)
+            join_waiters()
+            self.assertTrue(pending.done())
+            self.assertEqual(inspect.getcoroutinestate(seen[0]), inspect.CORO_CLOSED)
+            self.assertEqual(self.hops, [])
+            loop.running = True
+            self.assertTrue(send.start_timer(ctx))  # on a ready loop: starts at once
+            self.assertEqual(len(self.hops), 1)
+
+    def test_a_failed_hand_over_ends_the_waiter_and_allows_a_retry(self):
+        ctx, loop = self.Ctx(), FakeLoop(running=False)
+        seen = []
+        original = send.Timer.run
+        self.hop_error = RuntimeError("Event loop is closed")
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            self.gateway(loop=loop),
+            self.data_dir(tmp),
+            self.fake_hop(),
+            mock.patch.object(send.Timer, "run", lambda timer: seen.append(original(timer)) or seen[-1]),
+            self.assertLogs("snooze.send", "INFO") as logs,
+        ):
+            pending = self.start_with_waiter(ctx, tmp, wait_timeout=10)
+            loop.running = True
+            join_waiters()
+            self.assertTrue(pending.done())
+            self.assertEqual(inspect.getcoroutinestate(seen[0]), inspect.CORO_CLOSED)
+            self.assertEqual(send._timers, {})
+        self.assertTrue(any("scheduling failed" in line for line in logs.output))
+
+    def test_the_fallback_on_the_loop_takes_over_from_the_waiter(self):
+        ctx, loop = self.Ctx(), FakeLoop(running=False)
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=loop), self.data_dir(tmp), self.fake_hop():
+            with self.assertLogs("snooze.send", "INFO"):
+                pending = self.start_with_waiter(ctx, tmp, wait_timeout=10)
+                self.assertTrue(in_loop(lambda: send.start_timer(ctx)))  # the hook, on a loop
+                self.assertEqual(len(ctx.spawned), 1)
+                self.assertIs(send._timers[str(tmp)], ctx.tasks[0])
+                loop.running = True  # the gateway loop comes up after all
+                join_waiters()
+            self.assertTrue(pending.done())
+            self.assertEqual(self.hops, [])  # the waiter stood down: still one timer
+            self.assertIs(send._timers[str(tmp)], ctx.tasks[0])
+            self.assertEqual(len(ctx.spawned), 1)
+
+    def test_the_fallback_leaves_it_to_a_waiter_that_already_claimed_the_job(self):
+        ctx = self.Ctx()
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=FakeLoop()), self.data_dir(tmp):
+            pending = send._PendingTimer()
+            send._timers[str(tmp)] = pending
+            self.assertTrue(pending.claim())
+            self.assertFalse(pending.done())
+            self.assertFalse(in_loop(lambda: send.start_timer(ctx)))
+            self.assertEqual(ctx.spawned, [])
+            pending.finish()
+            self.assertTrue(pending.done())
+            self.assertFalse(pending.supersede())
+
+    def test_the_waiter_keeps_the_callers_context(self):
+        scope = contextvars.ContextVar("scope", default="unset")
+        seen = {}
+        ran = threading.Event()
+
+        async def fake_run(timer, interval=0):
+            seen["scope"] = scope.get()
+            seen["thread"] = threading.current_thread()
+            ran.set()
+
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        self.addCleanup(loop.close)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(loop.call_soon_threadsafe, loop.stop)
+        started = threading.Event()
+        loop.call_soon_threadsafe(started.set)
+        self.assertTrue(started.wait(5))
+        ctx = self.Ctx()
+
+        def register_like_hermes():
+            scope.set("profile-a")
+            with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=None), self.data_dir(tmp):
+                with mock.patch.object(send.Timer, "run", fake_run), self.assertLogs("snooze.send", "INFO"):
+                    self.result = send.start_timer(ctx, wait_poll=0.005, wait_timeout=10)
+                    self.runner._gateway_loop = loop  # the loop comes up while the waiter polls
+                    self.assertTrue(ran.wait(5))
+                    join_waiters()
+
+        worker = threading.Thread(target=register_like_hermes)
+        worker.start()
+        worker.join(15)
+        self.assertFalse(self.result)
+        self.assertEqual(seen["scope"], "profile-a")
+        self.assertIs(seen["thread"], thread)
 
     def test_a_failed_hop_closes_the_coroutine(self):
         self.hop_error = RuntimeError("Event loop is closed")
@@ -494,8 +657,10 @@ class StartTest(unittest.TestCase):
         self.assertIn("not in the gateway", logs.output[0])
         with self.assertLogs("snooze.send", "INFO") as logs, tempfile.TemporaryDirectory() as tmp:
             with self.gateway(), self.data_dir(tmp):
-                send.start_timer(self.Ctx())
+                send.start_timer(self.Ctx(), wait_timeout=0.01, wait_poll=0.005)
+                join_waiters()
         self.assertIn("gateway loop not ready", logs.output[0])
+        self.assertTrue(any("gave up waiting" in line for line in logs.output))
         with self.assertLogs("snooze.send", "INFO") as logs, tempfile.TemporaryDirectory() as tmp:
             with self.gateway(), self.data_dir(tmp):
                 in_loop(lambda: send.start_timer(self.Ctx()))
