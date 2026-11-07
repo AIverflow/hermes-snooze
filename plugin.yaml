@@ -1,7 +1,19 @@
 name: snooze
 version: "0.1.0"
-description: "A reminder that repeats on your phone until you confirm it, then can hand a follow-up to the agent. Zero LLM calls per reminder."
+description: >-
+  A reminder that repeats on your phone until you confirm it, then can hand a follow-up to the agent.
+  Zero LLM calls per reminder. Disclosure: (1) a timer task runs in the Hermes gateway and checks due
+  reminders every 15 seconds; it runs only in the gateway, so the gateway must be running. (2) Two hooks see
+  every inbound gateway message (and Telegram reaction) before the agent; they read it to catch ok, later and
+  yes replies, consume a pure confirm, and leave every other message untouched. (3) It sends messages on its
+  own (reminders and status lines) to the chat a snooze was created in, through Hermes's own send path, with
+  no LLM call; the only network traffic is Hermes's own messaging to the platform you set up. (4) Data is stored in the plugin data directory: snoozes.json
+  and two lock files (snoozes.lock, sender.lock). (5) It reads the Hermes pause flag, the gateway running state and the profile's home
+  channel config, read-only. A then-action can start one agent turn, only if the user sets
+  allow_gateway_injection. No credentials, no shell commands, no telemetry.
 author: the023
+homepage: https://github.com/AIverflow/hermes-snooze
+tags: [reminder, gateway, telegram, discord, automation]
 requires_hermes: ">=0.22.7"
 provides_tools:
   - snooze_create

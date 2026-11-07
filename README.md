@@ -8,7 +8,11 @@ A reminder for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that
 
 ## Status
 
-Work in progress. Every part is built (command, tool, timer, reply hooks, `then`, `/snooze test`); not yet tested end to end on a phone.
+New (v0.1.0). Everything below is built: command, agent tool, timer, reply hooks, `then`, `/snooze test`. It has had little real-world use so far: expect rough edges. Not supported: see [Limits](#limits).
+
+## Screenshots
+
+None yet.
 
 ## Install and first steps
 
@@ -23,18 +27,19 @@ Requires Hermes Agent 0.22.7 or later and Python 3.10+.
 
    Or clone this repo into `~/.hermes/plugins/snooze` and run the second command.
 
-2. Restart Hermes (and the gateway, if you use one).
-3. Send a first snooze from a chat (Telegram, Discord, ...) or from the CLI:
+2. Restart the gateway (`hermes gateway restart`, or `hermes gateway start` if it is not running). The timer and the reply hooks live in the gateway, so reminders only go out while it runs.
+3. Check the setup: send `/snooze test` in the chat you will use. Within 15 seconds you get a test reminder; reply `ok` within 2 minutes and you get "Test passed". If no gateway runs for this profile, it says so and makes no test.
+4. Send a first snooze from a chat (Telegram, Discord, ...). From the CLI you can create and manage snoozes, but reminders still need the gateway:
 
    ```
    /snooze Take my pill in 30m every 5m
    ```
 
-4. The plugin answers with an echo: what, when (in your time zone), how to stop it, where it goes, how to undo it.
-5. By default a new snooze waits for you to reply `yes` (within 10 minutes) before it starts. Reply `yes` or send `/snooze yes`.
-6. When the reminders arrive, reply `ok` to stop them, or `later 30` to push them back 30 minutes.
+5. The plugin answers with an echo: what, when (in your time zone), how to stop it, where it goes, how to undo it.
+6. By default a new snooze waits for you to reply `yes` (within 10 minutes) before it starts. Reply `yes` or send `/snooze yes`.
+7. When the reminders arrive, reply `ok` to stop them, or `later 30` to push them back 30 minutes.
 
-From the CLI (no chat), reminders go to the first home channel set in your profile.
+A snooze made from the CLI (no chat) goes to the first home channel set in your profile.
 
 ## Writing a snooze
 
@@ -166,11 +171,23 @@ Snoozes are stored per profile in the plugin data directory:
 | `snoozes.lock` | Held during every read-modify-write. |
 | `sender.lock` | Held by the one process that sends reminders, so several Hermes processes never send twice. |
 
+## What it runs and reads
+
+| What | Detail |
+|---|---|
+| Timer | One task in the gateway, every 15 seconds. It sends due reminders through Hermes's own send path (no LLM call). |
+| Hooks | `pre_gateway_dispatch` and `gateway_platform_event` see every inbound gateway message and Telegram reaction before the agent. They only act on replies to a running snooze; all other messages pass untouched. |
+| Own messages | Reminders, `✅ Done`, `⌛ Missed` and `then` status lines, sent to the chat the snooze was created in. |
+| Reads outside its data | The Hermes pause flag, whether a gateway is running, and the profile's home channel (for snoozes made from the CLI). Read-only. |
+| Network, credentials, shell | None of its own. No telemetry. |
+
 ## Limits
 
-- The gateway must be running for the profile (`hermes gateway start`): it sends the reminders and reads your replies. Ideally run it on an always-on machine; a sleeping laptop sends nothing. If it is not running, a new snooze's echo warns you.
-- Do Not Disturb on your phone is your job: allow the bot's notifications, and do not mute the chat.
-- Voice-note confirms are not supported.
+- **The gateway must run.** The timer runs only in the gateway of the profile (`hermes gateway start`), and the gateway is also what reads your replies. A CLI or Desktop session alone sends nothing. Run it on an always-on machine; a sleeping laptop sends nothing, and after wake-up one late reminder follows ("late by N min"). If no gateway runs, a new snooze's echo warns you, and `/snooze test` tells you.
+- **`hermes pause` holds reminders.** While Hermes is paused, no reminder is sent; `/snooze list` shows "paused". After `hermes resume`, one late reminder follows per snooze, not a burst.
+- Do Not Disturb on your phone is your job: allow the bot's notifications, and do not mute the chat. The plugin cannot get through a muted chat.
+- Voice-note confirms are not supported: only text, emoji and reactions count.
+- Reaction confirms work on Telegram private chats only (a reaction carries no user id, so groups are refused).
 - WhatsApp Cloud API is not supported (it cannot send 24 hours after your last message).
 
 ## Development
