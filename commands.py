@@ -146,7 +146,7 @@ def resolve_timezone(value: Any) -> str:
 
 
 def pending_deadline(snooze: Snooze) -> datetime | None:
-    """When a pending snooze stops waiting for `yes` (creation + `PENDING_TIMEOUT`), or None if `created` is unreadable."""
+    """When a pending snooze stops waiting for `yes` (creation + `PENDING_TIMEOUT`); None if `created` is unreadable."""
     created = _from_iso(snooze.created)
     return created + PENDING_TIMEOUT if created else None
 
@@ -469,7 +469,7 @@ class Commands:
         return self._home_target(), "home channel"
 
     def _add(self, spec: Spec, target: Target) -> tuple[Snooze, bool, Settings, datetime]:
-        """Store a new snooze for `spec`. Returns the record, whether its stop time is the cap, the settings, and now."""
+        """Store a new snooze for `spec`. Returns (record, whether its stop time is the cap, settings, now)."""
         settings = read_settings(self._ctx)
         now = self._now()
         capped = spec.until is None
@@ -755,11 +755,17 @@ TOOL_SCHEMA = {
             },
             "first_at": {
                 "type": "string",
-                "description": "When the first reminder is sent: ISO 8601 date and time in the user's local time, for example 2026-11-07T16:00.",
+                "description": (
+                    "When the first reminder is sent: ISO 8601 date and time in the user's local time, "
+                    "for example 2026-11-07T16:00."
+                ),
             },
             "every": {
                 "type": "string",
-                "description": "Repeat interval: minutes as a number, or a duration such as '10m' or '1h30m'. Minimum 1 minute. Default 10 minutes.",
+                "description": (
+                    "Repeat interval: minutes as a number, or a duration such as '10m' or '1h30m'. "
+                    "Minimum 1 minute. Default 10 minutes."
+                ),
             },
             "until": {
                 "type": "string",
@@ -767,11 +773,15 @@ TOOL_SCHEMA = {
             },
             "confirm": {
                 "type": "string",
-                "description": "How the user confirms: 'ok' (default), a word, an emoji, 'any' (any message) or 'contains:<word>'.",
+                "description": (
+                    "How the user confirms: 'ok' (default), a word, an emoji, 'any' (any message) or 'contains:<word>'."
+                ),
             },
             "then": {
                 "type": "string",
-                "description": "Optional action for the agent to do after the user confirms, for example 'close ticket 42'.",
+                "description": (
+                    "Optional action for the agent to do after the user confirms, for example 'close ticket 42'."
+                ),
             },
         },
         "required": ["text", "first_at"],
