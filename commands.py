@@ -98,43 +98,23 @@ class Settings:
     timezone: str = "UTC"  # an IANA name; "system" is already resolved
 
 
-def read_settings(ctx: Any) -> Settings:
-    """Read the plugin config through `ctx.get_config(key, default)`, with defaults for anything missing or invalid."""
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
-    def get(key: str, default: Any) -> Any:
-        try:
-            return ctx.get_config(key, default)
-        except Exception:
-            return default
+
+def read_settings(ctx: Any) -> Settings:
+    """Read the plugin config through `ctx.get_config(key, default)`. An invalid value falls back to its default."""
+
+    def get(key: str, default: Any, is_valid: Callable[[Any], bool]) -> Any:
+        value = ctx.get_config(key, default)
+        return value if is_valid(value) else default
 
     return Settings(
-        validate_setup=_as_bool(get("validate_setup", DEFAULT_VALIDATE_SETUP), DEFAULT_VALIDATE_SETUP),
-        cap_minutes=_as_positive_int(get("cap_minutes", DEFAULT_CAP_MINUTES), DEFAULT_CAP_MINUTES),
-        cap_reminders=_as_positive_int(get("cap_reminders", DEFAULT_CAP_REMINDERS), DEFAULT_CAP_REMINDERS),
-        timezone=resolve_timezone(get("timezone", "system")),
+        validate_setup=get("validate_setup", DEFAULT_VALIDATE_SETUP, lambda v: isinstance(v, bool)),
+        cap_minutes=get("cap_minutes", DEFAULT_CAP_MINUTES, _is_positive_int),
+        cap_reminders=get("cap_reminders", DEFAULT_CAP_REMINDERS, _is_positive_int),
+        timezone=resolve_timezone(ctx.get_config("timezone", "system")),
     )
-
-
-def _as_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        low = value.strip().lower()
-        if low in ("true", "yes", "on", "1"):
-            return True
-        if low in ("false", "no", "off", "0"):
-            return False
-    return default
-
-
-def _as_positive_int(value: Any, default: int) -> int:
-    if isinstance(value, bool):
-        return default
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return default
-    return number if number > 0 else default
 
 
 def _valid_zone(name: str) -> bool:
@@ -146,22 +126,12 @@ def _valid_zone(name: str) -> bool:
 
 
 def system_timezone() -> str:
-    """IANA name of the machine's time zone (TZ, then /etc/localtime, then /etc/timezone), else "UTC"."""
+    """IANA name of the machine's time zone (from TZ, else the /etc/localtime link), or "UTC"."""
     candidates = [os.environ.get("TZ", "").lstrip(":")]
-    try:
-        real = os.path.realpath("/etc/localtime")
-        if "zoneinfo/" in real:
-            candidates.append(real.split("zoneinfo/", 1)[1])
-    except OSError:
-        pass
-    try:
-        candidates.append(Path("/etc/timezone").read_text(encoding="utf-8").strip())
-    except OSError:
-        pass
-    for name in candidates:
-        if name and _valid_zone(name):
-            return name
-    return "UTC"
+    real = os.path.realpath("/etc/localtime")
+    if "zoneinfo/" in real:
+        candidates.append(real.split("zoneinfo/", 1)[1])
+    return next((name for name in candidates if name and _valid_zone(name)), "UTC")
 
 
 def resolve_timezone(value: Any) -> str:

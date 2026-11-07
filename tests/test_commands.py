@@ -190,10 +190,6 @@ class ValidateSetupOffTest(Base):
         self.assertIn("Snooze #1 set", echo)
         self.assertIn("Undo:     /snooze cancel 1", echo)
 
-    def test_string_false_is_false(self):
-        self.ctx.config["validate_setup"] = "false"
-        self.assertEqual(self.create().state, ACTIVE)
-
 
 class TargetTest(Base):
     def test_gateway_source_is_the_target(self):
@@ -635,10 +631,6 @@ class ToolTest(Base):
 
 
 class SettingsTest(unittest.TestCase):
-    def test_defaults_without_get_config(self):
-        settings = commands.read_settings(object())
-        self.assertEqual((settings.validate_setup, settings.cap_minutes, settings.cap_reminders), (True, 120, 10))
-
     def test_values_are_read(self):
         ctx = FakeCtx(validate_setup=False, cap_minutes=30, cap_reminders=3, timezone="Asia/Tokyo")
         settings = commands.read_settings(ctx)
@@ -652,13 +644,6 @@ class SettingsTest(unittest.TestCase):
         settings = commands.read_settings(ctx)
         self.assertEqual((settings.validate_setup, settings.cap_minutes, settings.cap_reminders), (True, 120, 10))
         self.assertEqual(settings.timezone, commands.system_timezone())
-
-    def test_get_config_that_raises(self):
-        class Broken:
-            def get_config(self, key, default=None):
-                raise RuntimeError("boom")
-
-        self.assertEqual(commands.read_settings(Broken()).cap_minutes, 120)
 
     def test_system_timezone_is_a_real_zone(self):
         name = commands.resolve_timezone("system")
