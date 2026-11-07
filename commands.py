@@ -460,20 +460,21 @@ class Commands:
     def _dispatch(self, text: str, source: Any) -> str:
         if not text:
             return HELP
-        words = text.split()
-        name, rest = words[0].lower(), words[1:]
+        name, *args = text.split()
+        name = name.lower()
+
         if name in SUBCOMMANDS:
-            reply = getattr(self, f"_cmd_{name}")(rest)
+            reply = getattr(self, f"_cmd_{name}")(args)
             if reply is not None:
                 return reply
-            parsed = self._parse(text)
-            if isinstance(parsed, ParseError):
+            # The arguments do not fit the subcommand. "cancel the order at 4pm" is still a reminder.
+
+        spec = self._parse(text)
+        if isinstance(spec, ParseError):
+            if name in SUBCOMMANDS:
                 return USAGE[name]
-        else:
-            parsed = self._parse(text)
-            if isinstance(parsed, ParseError):
-                return f"⚠️ {parsed.message}\nExample: {parsed.example}\nNothing was set."
-        return self._create_from_spec(parsed, *self._command_target(source))
+            return f"⚠️ {spec.message}\nExample: {spec.example}\nNothing was set."
+        return self._create_from_spec(spec, *self._command_target(source))
 
     def _parse(self, text: str) -> Spec | ParseError:
         return _parse.parse(text, self._now(), read_settings(self._ctx).timezone)
@@ -616,7 +617,7 @@ class Commands:
         return _duration(text)
 
     # -- subcommands -----------------------------------------------------------
-    # Each returns the reply, or None when the arguments do not fit its shape.
+    # Each `_cmd_*` takes the words after the name and returns the reply, or None when they do not fit its usage.
 
     def _cmd_list(self, rest: list) -> str | None:
         if rest:
