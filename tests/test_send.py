@@ -1,0 +1,393 @@
+import asyncio
+import json
+import logging
+import sys
+import tempfile
+import types
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest import mock
+
+from snooze import send
+from snooze.store import ACTIVE, DONE, MISSED, PENDING, Schedule, SenderLock, Snooze, Store, Target
+
+T0 = datetime(2026, 11, 7, 17, 0, tzinfo=timezone.utc)
+
+
+def iso(dt):
+    return dt.isoformat()
+
+
+def make(*, state=ACTIVE, every=10, until=T0 + timedelta(hours=1), next_at=T0, **kw):
+    return Snooze(
+        text="Take the pill",
+        created=iso(T0 - timedelta(hours=1)),
+        target=Target(platform="telegram", chat_id="123"),
+        schedule=Schedule(first_at=iso(T0), every=every, until=iso(until) if until else None),
+        state=state,
+        next_at=iso(next_at),
+        **kw,
+    )
+
+
+class FakeSender:
+    def __init__(self):
+        self.sent = []  # (platform, chat_id, text)
+        self.fail = None  # an error text: send raises SendError with it
+        self.during = None  # called inside send(), to act "while the message is on the wire"
+
+    def send(self, target, text):
+        if self.during:
+            self.during()
+        if self.fail:
+            raise send.SendError(self.fail)
+        self.sent.append((target.platform, target.chat_id, text))
+        return f"m{len(self.sent)}"
+
+
+class TimerCase(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.store = Store(self.dir, lock_timeout=0.5)
+        self.sender = FakeSender()
+        self.now = T0
+        self.paused = False
+        self.timer = self.make_timer()
+        logger = logging.getLogger("snooze.send")
+        level = logger.level
+        logger.setLevel(logging.CRITICAL)  # the failure tests would otherwise print warnings
+        self.addCleanup(logger.setLevel, level)
+
+    def make_timer(self, sender=None):
+        timer = send.Timer(
+            self.store,
+            sender or self.sender,
+            SenderLock(self.dir),
+            cap_reminders=lambda: 3,
+            now=lambda: self.now,
+            is_paused=lambda: self.paused,
+        )
+        self.addCleanup(timer.lock.release)
+        return timer
+
+    def add(self, **kw):
+        return self.store.add(make(**kw)).id
+
+    def get(self, snooze_id):
+        return self.store.get(snooze_id)
+
+
+class TickTest(TimerCase):
+    def test_sends_a_due_reminder_and_schedules_the_next(self):
+        sid = self.add()
+        self.assertEqual(self.timer.tick(), 1)
+        self.assertEqual(self.sender.sent, [("telegram", "123", "🔔 Take the pill  (reply ok / later)")])
+        s = self.get(sid)
+        self.assertEqual((s.state, s.sent_count, s.last_message_id), (ACTIVE, 1, "m1"))
+        self.assertEqual(s.last_sent_at, iso(T0))
+        self.assertEqual(s.next_at, iso(T0 + timedelta(minutes=10)))
+
+    def test_nothing_due_sends_nothing_and_writes_nothing(self):
+        self.add(next_at=T0 + timedelta(minutes=5))
+        before = self.store.path.read_text()
+        self.assertEqual(self.timer.tick(), 0)
+        self.assertEqual(self.sender.sent, [])
+        self.assertEqual(self.store.path.read_text(), before)
+
+    def test_second_reminder_says_its_number(self):
+        self.add()
+        self.timer.tick()
+        self.now = T0 + timedelta(minutes=10)
+        self.timer.tick()
+        self.assertEqual(self.sender.sent[1][2], "🔔 Take the pill (2nd)")
+
+    def test_late_reminder_says_how_late(self):
+        self.add()
+        self.now = T0 + timedelta(minutes=40)
+        self.timer.tick()
+        self.assertTrue(self.sender.sent[0][2].endswith("⏰ late by 40 min"))
+
+    def test_the_target_is_a_platform_chat_pair(self):
+        self.add()
+        s = make()
+        s.target = Target(platform="discord", chat_id="999")
+        self.store.add(s)
+        self.timer.tick()
+        self.assertEqual({(p, c) for p, c, _ in self.sender.sent}, {("telegram", "123"), ("discord", "999")})
+
+    def test_cap_ends_the_snooze_with_a_missed_message(self):
+        sid = self.add(sent_count=3)
+        self.timer.tick()
+        self.assertEqual(self.sender.sent, [("telegram", "123", "⌛ Missed: Take the pill (3 reminders, no answer)")])
+        self.assertEqual(self.get(sid).state, MISSED)
+
+    def test_until_ends_the_snooze(self):
+        sid = self.add(until=T0, sent_count=1)
+        self.timer.tick()
+        self.assertEqual(self.sender.sent[0][2], "⌛ Missed: Take the pill (1 reminder, no answer)")
+        self.assertEqual(self.get(sid).state, MISSED)
+        self.assertEqual(self.timer.tick(), 0)  # said once
+
+    def test_pending_snooze_expires_with_not_started(self):
+        sid = self.add(state=PENDING, next_at=T0)
+        self.now = T0 + timedelta(hours=2)
+        self.timer.tick()
+        self.assertEqual(self.sender.sent, [("telegram", "123", "⌛ Not started: Take the pill")])
+        self.assertEqual(self.get(sid).state, MISSED)
+
+    def test_done_and_cancelled_snoozes_are_left_alone(self):
+        self.add(state=DONE)
+        self.assertEqual(self.timer.tick(), 0)
+
+
+class FailureTest(TimerCase):
+    def test_failed_send_stores_last_error_and_retries(self):
+        sid = self.add()
+        self.sender.fail = "chat not found"
+        self.assertEqual(self.timer.tick(), 0)
+        s = self.get(sid)
+        self.assertEqual((s.sent_count, s.last_error, s.next_at), (0, "chat not found", iso(T0)))
+        self.sender.fail = None
+        self.now = T0 + timedelta(seconds=15)
+        self.assertEqual(self.timer.tick(), 1)
+        s = self.get(sid)
+        self.assertEqual((s.sent_count, s.last_error), (1, None))
+        self.assertEqual(s.next_at, iso(self.now + timedelta(minutes=10)))
+
+    def test_unexpected_exception_from_the_sender_is_an_error_too(self):
+        sid = self.add()
+        self.sender.send = mock.Mock(side_effect=ValueError("boom"))
+        self.timer.tick()
+        self.assertEqual(self.get(sid).last_error, "boom")
+
+    def test_failed_miss_message_is_not_retried_and_keeps_the_error(self):
+        sid = self.add(sent_count=3)
+        self.sender.fail = "blocked"
+        self.timer.tick()
+        s = self.get(sid)
+        self.assertEqual((s.state, s.last_error), (MISSED, "blocked"))
+        self.sender.fail = None
+        self.assertEqual(self.timer.tick(), 0)
+        self.assertEqual(self.sender.sent, [])
+
+    def test_long_error_is_cut(self):
+        sid = self.add()
+        self.sender.fail = "x" * 1000
+        self.timer.tick()
+        self.assertLessEqual(len(self.get(sid).last_error), send.MAX_ERROR_CHARS)
+
+    def test_corrupt_store_raises_for_the_loop_to_log(self):
+        self.store.path.write_text("{not json")
+        with self.assertRaises(send.StoreError):
+            self.timer.tick()
+
+
+class LockTest(TimerCase):
+    def test_two_timers_never_send_twice(self):
+        self.add()
+        other_sender = FakeSender()
+        other = self.make_timer(other_sender)
+        self.assertEqual(self.timer.tick(), 1)
+        self.assertEqual(other.tick(), 0)
+        self.now = T0 + timedelta(minutes=10)
+        self.assertEqual(other.tick(), 0)  # still not its turn
+        self.assertEqual(self.timer.tick(), 1)
+        self.assertEqual(other_sender.sent, [])
+
+    def test_another_timer_takes_over_when_the_holder_stops(self):
+        self.add()
+        other_sender = FakeSender()
+        other = self.make_timer(other_sender)
+        self.timer.tick()
+        self.timer.lock.release()
+        self.now = T0 + timedelta(minutes=10)
+        self.assertEqual(other.tick(), 1)
+
+    def test_store_is_not_locked_during_the_send(self):
+        sid = self.add()
+        outcome = []
+
+        def during():
+            # A command (here: a store write with a short lock timeout) must go through mid-send.
+            self.store.update(lambda txn: txn.get(sid).__setattr__("text", "edited"))
+            outcome.append("written")
+
+        self.sender.during = during
+        self.timer.tick()
+        self.assertEqual(outcome, ["written"])
+        self.assertEqual(self.get(sid).text, "edited")
+        self.assertEqual(self.get(sid).sent_count, 1)
+
+    def test_confirmed_during_the_send_stays_confirmed(self):
+        sid = self.add()
+        self.sender.during = lambda: self.store.update(lambda txn: setattr(txn.get(sid), "state", DONE))
+        self.timer.tick()
+        s = self.get(sid)
+        self.assertEqual((s.state, s.sent_count), (DONE, 1))
+
+    def test_later_during_the_send_keeps_the_new_time(self):
+        sid = self.add()
+        pushed = iso(T0 + timedelta(minutes=30))
+        self.sender.during = lambda: self.store.update(lambda txn: setattr(txn.get(sid), "next_at", pushed))
+        self.timer.tick()
+        s = self.get(sid)
+        self.assertEqual((s.next_at, s.sent_count, s.last_message_id), (pushed, 1, "m1"))
+
+
+class PauseTest(TimerCase):
+    def test_paused_sends_nothing_then_one_catch_up_after_resume(self):
+        sid = self.add()
+        self.paused = True
+        self.now = T0 + timedelta(minutes=45)
+        self.assertEqual(self.timer.tick(), 0)
+        self.assertEqual(self.sender.sent, [])
+        self.paused = False
+        self.assertEqual(self.timer.tick(), 1)
+        self.assertEqual(self.timer.tick(), 0)  # one reminder, not a burst
+        self.assertTrue(self.sender.sent[0][2].endswith("⏰ late by 45 min"))
+        self.assertEqual(self.get(sid).sent_count, 1)
+
+    def test_paused_holds_the_missed_message_too(self):
+        sid = self.add(sent_count=3)
+        self.paused = True
+        self.timer.tick()
+        self.assertEqual(self.get(sid).state, ACTIVE)
+        self.assertEqual(self.sender.sent, [])
+
+    def test_hermes_is_paused_reads_the_estop_switch(self):
+        estop = types.ModuleType("agent.estop")
+        estop.is_engaged = lambda: True
+        with mock.patch.dict(sys.modules, {"agent": types.ModuleType("agent"), "agent.estop": estop}):
+            self.assertTrue(send.hermes_is_paused())
+            estop.is_engaged = lambda: False
+            self.assertFalse(send.hermes_is_paused())
+
+    def test_hermes_is_paused_is_false_without_hermes(self):
+        with mock.patch.dict(sys.modules, {"agent": None}):
+            self.assertFalse(send.hermes_is_paused())
+
+
+class HermesSenderTest(unittest.TestCase):
+    def sender_with(self, reply):
+        module = types.ModuleType("tools.send_message_tool")
+        module.send_message_tool = mock.Mock(side_effect=lambda args: reply(args))
+        patch = mock.patch.dict(sys.modules, {"tools": types.ModuleType("tools"), "tools.send_message_tool": module})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return module
+
+    def test_sends_to_platform_chat_and_returns_the_message_id(self):
+        module = self.sender_with(lambda args: json.dumps({"success": True, "message_id": 77}))
+        mid = send.HermesSender().send(Target(platform="slack", chat_id="C123"), "hello")
+        self.assertEqual(mid, "77")
+        module.send_message_tool.assert_called_once_with({"action": "send", "target": "slack:C123", "message": "hello"})
+
+    def test_no_message_id_is_none(self):
+        self.sender_with(lambda args: json.dumps({"success": True}))
+        self.assertIsNone(send.HermesSender().send(Target(platform="signal", chat_id="+33"), "hi"))
+
+    def test_error_reply_raises_send_error(self):
+        self.sender_with(lambda args: json.dumps({"error": "Unknown platform"}))
+        with self.assertRaisesRegex(send.SendError, "Unknown platform"):
+            send.HermesSender().send(Target(platform="x", chat_id="1"), "hi")
+
+    def test_exception_and_garbage_reply_raise_send_error(self):
+        def boom(args):
+            raise RuntimeError("network down")
+
+        self.sender_with(boom)
+        with self.assertRaisesRegex(send.SendError, "network down"):
+            send.HermesSender().send(Target(platform="telegram", chat_id="1"), "hi")
+        self.sender_with(lambda args: "not json")
+        with self.assertRaises(send.SendError):
+            send.HermesSender().send(Target(platform="telegram", chat_id="1"), "hi")
+
+
+class StartTest(unittest.TestCase):
+    class Ctx:
+        def __init__(self, error=None):
+            self.error = error
+            self.spawned = []
+
+        def get_config(self, key, default=None):
+            return default
+
+        def spawn_task(self, coro, *, name=None):
+            if self.error:
+                raise self.error
+            self.spawned.append((coro, name))
+            coro.close()
+
+    def gateway(self, running=True):
+        module = types.ModuleType("gateway.run")
+        module._gateway_runner_ref = lambda: object() if running else None
+        return mock.patch.dict(sys.modules, {"gateway": types.ModuleType("gateway"), "gateway.run": module})
+
+    def data_dir(self, tmp):
+        return mock.patch.object(send, "hermes_data_dir", lambda: tmp)
+
+    def test_not_started_outside_the_gateway(self):
+        ctx = self.Ctx()
+        with mock.patch.dict(sys.modules, {"gateway.run": None}):
+            self.assertFalse(send.start_timer(ctx))
+        with self.gateway(running=False):
+            self.assertFalse(send.start_timer(ctx))
+        self.assertEqual(ctx.spawned, [])
+
+    def test_started_in_the_gateway(self):
+        ctx = self.Ctx()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            self.gateway(),
+            mock.patch.object(send, "hermes_data_dir", lambda: tmp),
+        ):
+            self.assertTrue(send.start_timer(ctx))
+        self.assertEqual([name for _, name in ctx.spawned], ["snooze:timer"])
+
+    def test_no_running_loop_means_not_started(self):
+        ctx = self.Ctx(error=RuntimeError("no running event loop"))
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            self.gateway(),
+            mock.patch.object(send, "hermes_data_dir", lambda: tmp),
+        ):
+            self.assertFalse(send.start_timer(ctx))
+
+
+class RunTest(TimerCase):
+    def test_loop_sends_and_frees_the_lock_when_cancelled(self):
+        self.add()
+
+        async def scenario():
+            task = asyncio.create_task(self.timer.run(interval=0.01))
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if self.sender.sent:
+                    break
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+        self.assertEqual(len(self.sender.sent), 1)
+        with SenderLock(self.dir) as held:
+            self.assertTrue(held)
+
+    def test_loop_survives_a_corrupt_store(self):
+        self.store.path.write_text("{not json")
+
+        async def scenario():
+            task = asyncio.create_task(self.timer.run(interval=0.01))
+            await asyncio.sleep(0.05)
+            self.assertFalse(task.done())
+            task.cancel()
+
+        with self.assertLogs("snooze.send", "WARNING"):
+            asyncio.run(scenario())
+
+
+if __name__ == "__main__":
+    unittest.main()
