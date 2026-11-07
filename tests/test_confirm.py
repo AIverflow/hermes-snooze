@@ -1,9 +1,16 @@
-import datetime
+import dataclasses
 import unittest
-from types import SimpleNamespace
 
 from snooze import confirm
-from snooze.confirm import Decision, match
+from snooze.confirm import Decision, Sender, match
+from snooze.parse import ConfirmRule, parse_ok_arg
+from snooze.store import Schedule, Snooze, Target
+
+
+def rule_of(text):
+    """The stored confirm rule for the word after `ok` in /snooze (a plain "ok" is the default rule)."""
+    rule = ConfirmRule() if text == "ok" else parse_ok_arg(text)
+    return {"kind": rule.kind, "value": rule.value}
 
 
 def snooze(
@@ -17,18 +24,21 @@ def snooze(
     last_message_id="m1",
     every=10,
 ):
-    return {
-        "id": id,
-        "state": state,
-        "confirm": confirm_rule,
-        "target": {"platform": platform, "chat_id": chat, "user_id": user},
-        "last_sent_at": last_sent_at,
-        "last_message_id": last_message_id,
-        "schedule": {"every": every},
-    }
+    """A stored snooze. `confirm_rule` is what the user typed after `ok`, or a ready dict."""
+    return Snooze(
+        id=id,
+        text="x",
+        created="2026-11-07T15:00:00",
+        target=Target(platform=platform, chat_id=chat, user_id=user),
+        schedule=Schedule(first_at="2026-11-07T16:00:00", every=every),
+        confirm=confirm_rule if isinstance(confirm_rule, dict) else rule_of(confirm_rule),
+        state=state,
+        last_sent_at=last_sent_at,
+        last_message_id=last_message_id,
+    )
 
 
-ME = {"platform": "telegram", "chat_id": "100", "user_id": "42"}
+ME = Sender(platform="telegram", chat_id="100", user_id="42")
 
 
 def run(text, snoozes=None, sender=ME, reply_to=None, **kw):
@@ -59,22 +69,8 @@ class DefaultOk(unittest.TestCase):
                 self.assertEqual(d.action, "confirm")
                 self.assertFalse(d.pass_through)
 
-    def test_object_shapes(self):
-        s = SimpleNamespace(
-            id=7,
-            state="active",
-            confirm=None,
-            target=SimpleNamespace(platform="telegram", chat_id=100, user_id=42),
-            last_sent_at=1.0,
-            last_message_id=5,
-            schedule=SimpleNamespace(every=3),
-        )
-        sender = SimpleNamespace(platform="telegram", chat_id="100", user_id="42")
-        self.assertEqual(match("ok", [s], sender, None).snooze_id, 7)
-
     def test_no_snoozes(self):
         self.assertEqual(run("ok", snoozes=[]).action, "none")
-        self.assertEqual(match("ok", None, ME, None).action, "none")
 
 
 class WordRule(unittest.TestCase):
@@ -169,10 +165,6 @@ class Later(unittest.TestCase):
     def test_later_default_is_interval(self):
         d = run("later", [snooze(every=15)])
         self.assertEqual(d, Decision("later", 1, 15, False))
-
-    def test_later_default_timedelta_interval(self):
-        d = run("later", [snooze(every=datetime.timedelta(minutes=5))])
-        self.assertEqual(d.later_minutes, 5)
 
     def test_later_default_without_interval(self):
         d = run("later", [snooze(every=None)])
@@ -285,43 +277,40 @@ class WhichSnooze(unittest.TestCase):
                 self.assertEqual(run("ok", [snooze(state=state)]).action, "none")
 
 
-class Sender(unittest.TestCase):
+class WhoCanAnswer(unittest.TestCase):
     def test_stranger_in_other_chat(self):
         # #20
-        stranger = {"platform": "telegram", "chat_id": "999", "user_id": "999"}
+        stranger = Sender(platform="telegram", chat_id="999", user_id="999")
         self.assertEqual(run("ok", sender=stranger).action, "none")
 
     def test_right_user_wrong_chat(self):
         # #20 / #23: thread or channel with another id
-        other = {"platform": "telegram", "chat_id": "101", "user_id": "42"}
+        other = Sender(platform="telegram", chat_id="101", user_id="42")
         self.assertEqual(run("ok", sender=other).action, "none")
 
     def test_right_chat_wrong_user(self):
         # #21: group chat, someone else replies
         group = [snooze(chat="-500")]
-        other = {"platform": "telegram", "chat_id": "-500", "user_id": "7"}
-        mine = {"platform": "telegram", "chat_id": "-500", "user_id": "42"}
+        other = Sender(platform="telegram", chat_id="-500", user_id="7")
+        mine = Sender(platform="telegram", chat_id="-500", user_id="42")
         self.assertEqual(run("ok", group, sender=other).action, "none")
         self.assertEqual(run("ok", group, sender=mine).action, "confirm")
 
     def test_wrong_platform(self):
-        other = {"platform": "discord", "chat_id": "100", "user_id": "42"}
+        other = Sender(platform="discord", chat_id="100", user_id="42")
         self.assertEqual(run("ok", sender=other).action, "none")
 
     def test_platform_case_insensitive_and_int_ids(self):
-        sender = {"platform": "Telegram", "chat_id": 100, "user_id": 42}
+        sender = Sender(platform="Telegram", chat_id=100, user_id=42)
         self.assertEqual(run("ok", sender=sender).action, "confirm")
 
     def test_missing_user_id_never_matches(self):
-        sender = {"platform": "telegram", "chat_id": "100", "user_id": None}
+        sender = Sender(platform="telegram", chat_id="100", user_id=None)
         self.assertEqual(run("ok", sender=sender).action, "none")
         self.assertEqual(run("ok", [snooze(user=None)], sender=sender).action, "none")
 
-    def test_no_sender(self):
-        self.assertEqual(run("ok", sender=None).action, "none")
-
     def test_stranger_cannot_use_reply_to(self):
-        stranger = {"platform": "telegram", "chat_id": "999", "user_id": "999"}
+        stranger = Sender(platform="telegram", chat_id="999", user_id="999")
         self.assertEqual(run("later", sender=stranger, reply_to="m1").action, "none")
 
     def test_other_users_snooze_is_skipped(self):
@@ -334,7 +323,7 @@ class Sender(unittest.TestCase):
 
 
 class Reaction(unittest.TestCase):
-    DM = {"platform": "telegram", "chat_id": "100", "user_id": None, "chat_type": "private"}
+    DM = Sender(platform="telegram", chat_id="100", user_id=None, chat_type="private")
 
     def test_reaction_in_private_chat(self):
         s = [snooze(confirm_rule="👍")]
@@ -348,19 +337,19 @@ class Reaction(unittest.TestCase):
     def test_reaction_in_group_ignored(self):
         # #21
         s = [snooze(confirm_rule="👍", chat="-500")]
-        group = {"platform": "telegram", "chat_id": "-500", "user_id": None, "chat_type": "group"}
+        group = Sender(platform="telegram", chat_id="-500", user_id=None, chat_type="group")
         self.assertEqual(run("👍", s, sender=group, is_reaction=True).action, "none")
-        no_type = {"platform": "telegram", "chat_id": "-500", "user_id": None}
+        no_type = Sender(platform="telegram", chat_id="-500", user_id=None)
         self.assertEqual(run("👍", s, sender=no_type, is_reaction=True).action, "none")
 
     def test_reaction_wrong_chat(self):
         s = [snooze(confirm_rule="👍")]
-        other = dict(self.DM, chat_id="555")
+        other = dataclasses.replace(self.DM, chat_id="555")
         self.assertEqual(run("👍", s, sender=other, is_reaction=True).action, "none")
 
     def test_reaction_wrong_user_when_known(self):
         s = [snooze(confirm_rule="👍")]
-        other = dict(self.DM, user_id="7")
+        other = dataclasses.replace(self.DM, user_id="7")
         self.assertEqual(run("👍", s, sender=other, is_reaction=True).action, "none")
 
     def test_reaction_needs_emoji_rule(self):
@@ -401,7 +390,7 @@ class Yes(unittest.TestCase):
 
     def test_yes_from_stranger(self):
         s = [snooze(state="pending", last_sent_at=None)]
-        stranger = {"platform": "telegram", "chat_id": "999", "user_id": "999"}
+        stranger = Sender(platform="telegram", chat_id="999", user_id="999")
         self.assertEqual(run("yes", s, sender=stranger).action, "none")
 
     def test_yes_with_active_and_pending(self):

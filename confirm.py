@@ -1,45 +1,29 @@
-"""Confirm matcher: decide what an inbound message means for the active snoozes.
+"""Confirm matcher: decide what an inbound message means for the running snoozes.
 
-Pure module: standard library only, no Hermes, no store/parse imports.
+Pure module: standard library plus the store's `Snooze` record.
 
-    match(message, active_snoozes, sender, reply_to_id, is_reaction=False) -> Decision
+    match(message, snoozes, sender, reply_to_id=None, is_reaction=False) -> Decision
 
-Expected input shapes (every "object" may be a dict or any object with attributes):
+`snoozes` are `store.Snooze` records; only those in state "active" or "pending"
+count. Their `confirm` is the dict the store keeps: {"kind": "ok" | "word" |
+"contains" | "any" | "emoji", "value": "<text>"}; `None` or an empty value means
+the default (`ok`). `schedule.every` (minutes) is the default `later` delay.
 
-snooze (one item of `active_snoozes`)
-    id               snooze id (any hashable; compared as given)
-    state            "active" (reminders are being sent) or "pending" (waiting for
-                     the user to validate the setup with `yes`); other states are ignored
-    confirm          the confirm rule, either a string or a dict
-                       "ok"                 default: the message is `ok`
-                       "any"                any message
-                       "contains:<word>"    the word anywhere in the message
-                       "<word>"             the message is that word (or starts with it)
-                       "<emoji>"            that emoji, in a message or as a reaction
-                       {"kind": "ok"|"any"|"contains"|"word"|"emoji", "value": "<text>"}
-                     `None` or an empty value means the default (`ok`).
-    target           where the reminder went: platform, chat_id, user_id
-    last_sent_at     when the last reminder was sent (None if never); any orderable value
-                     (ISO string, number, datetime)
-    last_message_id  id of the last reminder message in the chat (None if unknown)
-    schedule.every   repeat interval, in minutes (number) or a datetime.timedelta;
-                     used as the default `later` delay
-
-sender
-    platform, chat_id, user_id   who wrote the message
-    chat_type                    optional; "dm" or "private" marks a private chat
-                                 (only used for reactions)
+`sender` says who wrote the message. For a reaction, `message` is the emoji (a
+string or a list of strings), `sender.user_id` is None (reactions carry none)
+and `sender.chat_type` must say it is a private chat.
 
 The matching rules (who can answer, `later`, pass-through, text folding) are
 documented in the README ("Confirming").
 """
 
-import datetime
 import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
+
+from .store import ACTIVE, PENDING, Snooze
 
 NONE = "none"
 CONFIRM = "confirm"
@@ -53,8 +37,6 @@ _SKIN_TONES = {chr(c) for c in range(0x1F3FB, 0x1F400)}
 # Emoji variants that mean the same thing to a human, folded onto one symbol.
 _EMOJI_CANON = {"✔": "✅", "☑": "✅", "✓": "✅"}
 
-_PENDING = "pending"
-_ACTIVE = "active"
 _PRIVATE_CHATS = {"dm", "private"}
 
 _UNIT_MINUTES = {
@@ -73,24 +55,26 @@ _DURATION = re.compile(r"^(\d+)([a-z]*)$")
 
 
 @dataclass(frozen=True)
+class Sender:
+    """Who wrote the message (or put the reaction)."""
+
+    platform: str
+    chat_id: Any
+    user_id: Any = None
+    chat_type: str | None = None
+
+
+@dataclass(frozen=True)
 class Decision:
     """What to do with an inbound message."""
 
     action: str = NONE  # "none" | "confirm" | "later" | "yes"
-    snooze_id: Any = None  # the snooze concerned (None for "none")
+    snooze_id: int | None = None  # the snooze concerned (None for "none")
     later_minutes: int | None = None  # only for "later"
     pass_through: bool = True  # True: let the message reach the agent
 
 
 _NO_MATCH = Decision()
-
-
-def _get(obj: Any, name: str, default: Any = None) -> Any:
-    if obj is None:
-        return default
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
 
 
 # ---------------------------------------------------------------- text
@@ -142,39 +126,23 @@ def _find(tokens: list[str], needle: list[str]) -> int:
 # ---------------------------------------------------------------- confirm rule
 
 
-def _parse_rule(rule: Any):
-    """Return (kind, value tokens) for a confirm rule."""
-    kind, value = None, ""
-    if isinstance(rule, dict) or (rule is not None and not isinstance(rule, str)):
-        kind = _get(rule, "kind")
-        value = _get(rule, "value") or ""
-        kind = str(kind).lower() if kind else None
-    elif isinstance(rule, str):
-        raw = rule.strip()
-        low = raw.lower()
-        if low.startswith("contains:"):
-            kind, value = "contains", raw[len("contains:") :]
-        elif low in ("", "ok"):
-            kind = "ok"
-        elif low == "any":
-            kind = "any"
-        else:
-            kind, value = "word", raw
-    if kind in (None, ""):
-        kind = "ok"
-    toks = _tokens(value)
+def _parse_rule(rule: dict | None) -> tuple[str, list[str]]:
+    """Return (kind, value tokens) for a stored confirm rule."""
+    rule = rule or {}
+    kind = str(rule.get("kind") or "ok").lower()
+    tokens = _tokens(rule.get("value"))
     if kind == "ok":
         return "ok", ["ok"]
     if kind == "any":
         return "any", []
-    if kind == "word" and toks and not _has_words(toks):
+    if kind == "word" and tokens and not _has_words(tokens):
         kind = "emoji"
-    if kind in ("word", "emoji", "contains") and not toks:
+    if kind in ("word", "emoji", "contains") and not tokens:
         return "ok", ["ok"]  # empty value: fall back to the default
-    return kind, toks
+    return kind, tokens
 
 
-def _confirm_match(rule: Any, tokens: list[str]):
+def _confirm_match(rule: dict | None, tokens: list[str]):
     """Return (matched, pass_through) for a message against a rule."""
     kind, value = _parse_rule(rule)
     if not tokens:
@@ -196,7 +164,7 @@ def _confirm_match(rule: Any, tokens: list[str]):
     return False, False
 
 
-def _is_emoji_rule(rule: Any) -> bool:
+def _is_emoji_rule(rule: dict | None) -> bool:
     return _parse_rule(rule)[0] == "emoji"
 
 
@@ -224,12 +192,10 @@ def _later(tokens: list[str]):
     return True, None
 
 
-def _default_later(snooze: Any) -> int:
-    every = _get(_get(snooze, "schedule"), "every")
-    if isinstance(every, datetime.timedelta):
-        every = every.total_seconds() / 60
+def _default_later(snooze: Snooze) -> int:
+    every = snooze.schedule.every
     if isinstance(every, (int, float)) and not isinstance(every, bool) and every > 0:
-        return max(1, int(round(every)))
+        return max(1, round(every))
     return DEFAULT_LATER_MINUTES
 
 
@@ -240,91 +206,73 @@ def _same(a: Any, b: Any) -> bool:
     return a is not None and b is not None and str(a) == str(b)
 
 
-def _authorized(snooze: Any, sender: Any, is_reaction: bool) -> bool:
-    target = _get(snooze, "target")
-    if target is None or sender is None:
+def _authorized(snooze: Snooze, sender: Sender, is_reaction: bool) -> bool:
+    target = snooze.target
+    if not _same(target.platform.lower(), str(sender.platform).lower()):
         return False
-    t_platform, s_platform = _get(target, "platform"), _get(sender, "platform")
-    if not _same(
-        str(t_platform).lower() if t_platform is not None else None,
-        str(s_platform).lower() if s_platform is not None else None,
-    ):
-        return False
-    if not _same(_get(target, "chat_id"), _get(sender, "chat_id")):
+    if not _same(target.chat_id, sender.chat_id):
         return False
     if is_reaction:
-        # Reactions carry no (reliable) user id: private chats only, and a user id,
+        # Reactions carry no reliable user id: private chats only, and a user id,
         # when present, must still match.
-        if str(_get(sender, "chat_type") or "").lower() not in _PRIVATE_CHATS:
+        if str(sender.chat_type or "").lower() not in _PRIVATE_CHATS:
             return False
-        s_user = _get(sender, "user_id")
-        return s_user is None or _same(_get(target, "user_id"), s_user)
-    return _same(_get(target, "user_id"), _get(sender, "user_id"))
+        return sender.user_id is None or _same(target.user_id, sender.user_id)
+    return _same(target.user_id, sender.user_id)
 
 
-def _last_sent(snoozes: list[Any]) -> Any | None:
-    sent = [(i, s) for i, s in enumerate(snoozes) if _get(s, "last_sent_at") is not None]
-    if not sent:
-        return None
-    try:
-        return max(sent, key=lambda p: (_get(p[1], "last_sent_at"), p[0]))[1]
-    except TypeError:  # values of different types: trust the list order
-        return sent[-1][1]
-
-
-def _state(snooze: Any) -> str:
-    return str(_get(snooze, "state") or "").lower()
+def _last_sent(snoozes: list[Snooze]) -> Snooze | None:
+    """The snooze that sent a reminder last (ISO timestamps sort as text); later ones win ties."""
+    sent = [(s.last_sent_at, i, s) for i, s in enumerate(snoozes) if s.last_sent_at is not None]
+    return max(sent, key=lambda item: item[:2])[2] if sent else None
 
 
 # ---------------------------------------------------------------- entry point
 
 
 def match(
-    message: Any, active_snoozes: Iterable[Any], sender: Any, reply_to_id: Any = None, is_reaction: bool = False
+    message: str | list[str],
+    snoozes: list[Snooze],
+    sender: Sender,
+    reply_to_id: Any = None,
+    is_reaction: bool = False,
 ) -> Decision:
-    """Decide what `message` means. See the module docstring for the input shapes."""
+    """Decide what `message` means. See the module docstring for the inputs."""
     if is_reaction and not isinstance(message, str):
-        message = " ".join(str(m) for m in (message or ()))
+        message = " ".join(message)
     tokens = _tokens(message)
     if not tokens:
         return _NO_MATCH
 
-    mine = [s for s in (active_snoozes or ()) if _authorized(s, sender, is_reaction)]
-    mine = [s for s in mine if _state(s) in (_ACTIVE, _PENDING)]
-    if not mine:
-        return _NO_MATCH
+    mine = [s for s in snoozes if s.state in (ACTIVE, PENDING) and _authorized(s, sender, is_reaction)]
 
     replied = None
     if reply_to_id is not None and str(reply_to_id) != "":
-        hits = [s for s in mine if _same(_get(s, "last_message_id"), reply_to_id)]
+        hits = [s for s in mine if _same(s.last_message_id, reply_to_id)]
         replied = hits[-1] if hits else None
 
     if replied is not None:
-        active = replied if _state(replied) == _ACTIVE else None
-        pending = replied if _state(replied) == _PENDING else None
+        active = replied if replied.state == ACTIVE else None
+        pending = replied if replied.state == PENDING else None
     else:
-        active = _last_sent([s for s in mine if _state(s) == _ACTIVE])
-        pendings = [s for s in mine if _state(s) == _PENDING]
+        active = _last_sent([s for s in mine if s.state == ACTIVE])
+        pendings = [s for s in mine if s.state == PENDING]
         pending = pendings[-1] if pendings else None
 
     if is_reaction:
-        if active is not None and _is_emoji_rule(_get(active, "confirm")):
-            ok, _ = _confirm_match(_get(active, "confirm"), tokens)
-            if ok:
-                return Decision(CONFIRM, _get(active, "id"), None, False)
+        if active is not None and _is_emoji_rule(active.confirm) and _confirm_match(active.confirm, tokens)[0]:
+            return Decision(CONFIRM, active.id, None, False)
         return _NO_MATCH
 
     if active is not None:
         is_later, minutes = _later(tokens)
         if is_later:
-            return Decision(
-                LATER, _get(active, "id"), minutes if minutes is not None else _default_later(active), False
-            )
-        ok, extra = _confirm_match(_get(active, "confirm"), tokens)
-        if ok:
-            return Decision(CONFIRM, _get(active, "id"), None, extra)
+            return Decision(LATER, active.id, minutes if minutes is not None else _default_later(active), False)
+        matched, extra = _confirm_match(active.confirm, tokens)
+        if matched:
+            return Decision(CONFIRM, active.id, None, extra)
 
     if pending is not None and tokens == ["yes"]:
-        return Decision(YES, _get(pending, "id"), None, False)
+        return Decision(YES, pending.id, None, False)
 
     return _NO_MATCH

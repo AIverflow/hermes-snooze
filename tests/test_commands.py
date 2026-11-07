@@ -233,7 +233,7 @@ class ConfirmRoundTripTest(Base):
     """A stored rule is read back by confirm.match; `every` is in minutes."""
 
     config = {"validate_setup": False}
-    ME = {"platform": "telegram", "chat_id": "123", "user_id": "42"}
+    ME = confirm.Sender(platform="telegram", chat_id="123", user_id="42")
 
     def decide(self, message):
         return confirm.match(message, sent(self.store.load()), self.ME)
@@ -578,7 +578,7 @@ class ToolTest(Base):
 
     def test_confirm_values_round_trip_through_match(self):
         self.ctx.config["validate_setup"] = False
-        me = {"platform": "telegram", "chat_id": "123", "user_id": "42"}
+        me = confirm.Sender(platform="telegram", chat_id="123", user_id="42")
         for value, said in (
             ("taken", "taken"),
             ("contains:sent", "I sent it"),
