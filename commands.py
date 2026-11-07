@@ -2,37 +2,17 @@
 
 Hermes glue: nothing from Hermes is imported at the top of this file. Hermes
 modules are imported inside the small helpers that need them, so the module
-loads (and the tests run) without Hermes, using a fake `ctx`.
+loads (and the tests run) without Hermes, using a fake `ctx`. The commands and
+settings are documented in the README.
 
-Subcommands (anything else is a new reminder, see `parse.py` for the grammar)::
+Stored shapes (see `store.py`): `schedule.every` is the repeat interval in
+MINUTES (a number, which is what `confirm.py` reads); `confirm` is a dict
+{"kind": ..., "value": ...}.
 
-    /snooze <what> [at <time> | in <duration>] [every <duration>] [until <time>] ...
-    /snooze list                  snoozes that are running or waiting for `yes`
-    /snooze ok [id]               confirm from this client
-    /snooze later [N] [id]        push back N minutes (default: the snooze interval)
-    /snooze cancel <id>           stop without confirming
-    /snooze yes [id]              start a snooze that is waiting for validation
-    /snooze test                  not available yet
-
-A first word that is a subcommand name but does not fit the subcommand's shape
-is read as the start of a new reminder when the whole text parses as one
-("cancel the order at 4pm"); otherwise the usage line is shown.
-
-What is stored (see `store.py`)
-    schedule.every  the repeat interval in MINUTES (a number), which is what
-                    `confirm.py` reads; the plugin default is `DEFAULT_EVERY`
-    schedule.until  the explicit stop time, else first reminder + `cap_minutes`
-    confirm         a dict {"kind": ..., "value": ...} (the shape `confirm.py` reads)
-    state           "pending" until the user replies `yes` (config `validate_setup`,
-                    default true), then "active"; "active" at once if it is false
-
-A pending snooze that gets no `yes` within `PENDING_TIMEOUT` of its creation is
-not started: see `pending_deadline` / `is_pending_expired`. The sweep itself
-belongs to the timer; `yes` refuses an expired snooze and marks it "missed".
-The reminders cap (`cap_reminders`) is enforced where reminders are sent.
-
-Target of a new snooze: the chat the command or tool call came from when it is
-a messaging platform, else the first home channel set in the profile.
+A pending snooze that gets no `yes` within `PENDING_TIMEOUT` is not started
+(`pending_deadline` / `is_pending_expired`). The sweep belongs to the timer;
+`yes` refuses an expired snooze and marks it "missed". The reminders cap
+(`cap_reminders`) is enforced where reminders are sent.
 """
 from __future__ import annotations
 

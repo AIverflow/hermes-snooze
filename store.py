@@ -1,16 +1,11 @@
 """Snooze store: one JSON file per profile, guarded by a file lock.
 
 Pure module: standard library only, no Hermes import. The caller passes the
-data directory.
+data directory. The files are listed in the README ("Snooze life cycle").
 
-Files in the data directory:
-    snoozes.json   the records (written atomically: temp file + rename)
-    snoozes.lock   exclusive lock held during every read-modify-write
-    sender.lock    held by the one process that sends reminders
-
-Timestamps are ISO 8601 strings in UTC (for example "2026-11-07T18:00:00+00:00").
-The store does not interpret them; `schedule.py` does. The fields `every`,
-`confirm` and `then` are plain JSON values owned by the modules that use them.
+Timestamps are ISO 8601 strings in UTC. The store does not interpret them;
+`schedule.py` does. The fields `every`, `confirm` and `then` are plain JSON
+values owned by the modules that use them.
 """
 from __future__ import annotations
 

@@ -30,22 +30,8 @@ sender
     chat_type                    optional; "dm" or "private" marks a private chat
                                  (only used for reactions)
 
-Rules
-    * Only the exact chat + user the reminder went to can answer (platform, chat id and
-      user id must all match; a missing user id never matches).
-    * Reactions carry no user id. With `is_reaction=True` the message is the emoji (a string
-      or a list of strings); it is accepted only in a private chat whose chat id matches,
-      and only for an emoji rule.
-    * Which snooze: a reply to a reminder message picks that snooze; otherwise the active
-      snooze whose reminder was sent last.
-    * `later`, `later 30`, `later 1h`, `not now` always win over the confirm rule. They are
-      always consumed (pass_through False). Without a number the delay is the snooze interval.
-    * Pure confirm -> consumed. For the `ok`, word and emoji rules a confirm with more text
-      ("ok, and book a table") confirms AND passes the message on to the agent. For the `any`
-      and `contains` rules the whole message is the answer, so it is consumed.
-    * `yes` (the whole message) validates a snooze in state `pending`.
-    * Text is compared ignoring case, spaces, punctuation, emoji variation selectors, skin tones
-      and emoji variants (check marks are all the same).
+The matching rules (who can answer, `later`, pass-through, text folding) are
+documented in the README ("Confirming").
 """
 import datetime
 import re

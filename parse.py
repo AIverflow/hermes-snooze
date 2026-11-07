@@ -1,54 +1,8 @@
 """Turn the text after ``/snooze`` into a ``Spec`` (or a ``ParseError``).
 
-Pure module: standard library only, no Hermes imports.
-
-Grammar (keywords are case-insensitive, any order after the text)::
-
-    <what> [at <time> | in <duration>] [every <duration>] [until <time>]
-           [ok <word>] [then <action>]
-
-Rules:
-
-* ``then <action>`` takes everything after the first ``then`` (a ``then`` as
-  the very first word is plain text).
-* The words before ``then`` are read from the end. Each ``at``, ``in``,
-  ``every``, ``until`` or ``ok`` clause is cut off while it is valid and not a
-  repeat of one already read. Reading stops at the first thing that is not a
-  clause, so anything else stays in the text ("before 6pm" is text).
-* Short form: ``<what> 8am 10m`` means ``at 8am every 10m``. A lone trailing
-  time (``<what> 8am``) means ``at 8am``. A time right after a word like
-  ``before``/``by`` is not taken as a short-form time.
-* Times: ``8am``, ``8:30am``, ``4pm``, ``16:00``. A time that already passed
-  today means tomorrow (calendar day in the user's zone, so DST days are right;
-  a time skipped by a DST jump moves forward, a repeated one uses its first
-  occurrence).
-* ``until <time>`` is the first such time strictly after the first reminder.
-* Durations: ``10m``, ``1h``, ``90s``, ``1h30m`` (units ``s m h``, also ``sec
-  min hr``). Minimum 1 minute, for ``in`` and ``every``.
-* ``ok`` forms: ``ok`` (default), ``ok <word>``, ``ok contains:<word>``,
-  ``ok any``, ``ok <emoji>``.
-
-Result::
-
-    Spec
-        text      str              what to remind (never empty)
-        first_at  datetime         first reminder, aware, in UTC
-        every     timedelta|None   repeat interval; None = use the plugin default
-        until     datetime|None    stop time, aware, in UTC; None = no explicit stop
-        confirm   ConfirmRule      how the user confirms (see below)
-        then      str|None         action text for the agent after the confirm
-        tz        str              the user's time zone name, for local-time echoes
-
-    ConfirmRule
-        kind      "ok" | "word" | "contains" | "any" | "emoji"
-        value     str              the word / substring / emoji; "" for ok and any
-                                   (matching rules such as case are confirm.py's job)
-
-    ParseError
-        message   str              what is wrong, one short sentence
-        example   str              a working example line for the echo
-
-``parse`` returns the error instead of raising it.
+Pure module: standard library only, no Hermes imports. The grammar is
+documented in the README ("Writing a snooze"). ``parse`` returns the error
+instead of raising it.
 """
 import re
 from dataclasses import dataclass

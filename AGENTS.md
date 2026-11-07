@@ -20,6 +20,10 @@ The repo root is the plugin folder.
 - `__init__.py` imports the glue modules inside `register()`, not at the top, so tests can load the package without Hermes.
 - Tests import the plugin as package `snooze` (`from snooze import parse`). `tests/__init__.py` sets that up; don't edit it.
 
+## Docs
+
+All user-facing documentation lives in `README.md`. Code comments and docstrings explain the code, not the features: link to the README instead of repeating it.
+
 ## Tests
 
 `python3 -m unittest discover -s tests -t .` from the repo root. Must pass before a commit.
