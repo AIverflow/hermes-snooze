@@ -12,11 +12,12 @@ The repo root is the plugin folder.
 | `commands.py`, `hooks.py`, `send.py` | Hermes glue | yes |
 | `parse.py` | `/snooze` text → spec | **no** |
 | `store.py` | `snoozes.json` + file lock | **no** |
+| `echo.py` | Times, durations and the echo text shown to the user | **no** |
 | `confirm.py` | ok / word / emoji / later / yes matcher | **no** |
 | `schedule.py` | due / next-time rules | **no** |
 | `tests/test_<module>.py` | stdlib `unittest`, one file per module | — |
 
-- Pure modules (`parse`, `store`, `confirm`, `schedule`) use the standard library only, and relative imports between each other (`from .parse import Spec`).
+- Pure modules (`parse`, `store`, `confirm`, `echo`, `schedule`) use the standard library only, and relative imports between each other (`from .parse import Spec`).
 - `__init__.py` imports the glue modules inside `register()`, not at the top, so tests can load the package without Hermes.
 - Tests import the plugin as package `snooze` (`from snooze import parse`). `tests/__init__.py` sets that up; don't edit it.
 

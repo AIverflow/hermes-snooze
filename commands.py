@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import echo
 from . import parse as _parse
 from .parse import ConfirmRule, ParseError, Spec
 from .store import ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, Store, StoreError, Target, Txn
@@ -83,8 +84,6 @@ NO_TARGET_TEXT = (
 )
 
 OUT_OF_RANGE_TEXT = "⚠️ A date or number is out of range. Nothing was set."
-
-_PLATFORM_LABELS = {"whatsapp": "WhatsApp", "whatsapp_cloud": "WhatsApp Cloud", "sms": "SMS"}
 
 
 # -- settings ----------------------------------------------------------------
@@ -147,7 +146,7 @@ def resolve_timezone(value: Any) -> str:
 
 def pending_deadline(snooze: Snooze) -> datetime | None:
     """When a pending snooze stops waiting for `yes` (creation + `PENDING_TIMEOUT`); None if `created` is unreadable."""
-    created = _from_iso(snooze.created)
+    created = echo.from_iso(snooze.created)
     return created + PENDING_TIMEOUT if created else None
 
 
@@ -174,67 +173,6 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _from_iso(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def _zone(name: str) -> tzinfo:
-    try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError, OSError):
-        return timezone.utc
-
-
-def _minutes_value(delta: timedelta) -> float:
-    """A timedelta as minutes: an int when whole, else a float."""
-    minutes = delta.total_seconds() / 60
-    return int(minutes) if minutes == int(minutes) else round(minutes, 4)
-
-
-def format_minutes(minutes: Any) -> str:
-    """10 -> "10 min", 60 -> "1 h", 90 -> "1 h 30 min"."""
-    total = round(float(minutes) * 60)
-    hours, rest = divmod(total, 3600)
-    mins, secs = divmod(rest, 60)
-    parts = []
-    if hours:
-        parts.append(f"{hours} h")
-    if mins:
-        parts.append(f"{mins} min")
-    if secs:
-        parts.append(f"{secs} s")
-    return " ".join(parts) or "0 min"
-
-
-def format_when(moment: datetime, zone_name: str, now: datetime, relative_to: datetime | None = None) -> str:
-    """Local time of `moment`: "today 16:00", "tomorrow 08:00", "Sat 8 Nov 08:00".
-
-    With `relative_to`, a moment on the same local day is just "16:00".
-    """
-    zone = _zone(zone_name)
-    local = moment.astimezone(zone)
-    clock = f"{local:%H:%M}"
-    day = local.date()
-    if relative_to is not None and relative_to.astimezone(zone).date() == day:
-        return clock
-    today = now.astimezone(zone).date()
-    if day == today:
-        return f"today {clock}"
-    if day == today + timedelta(days=1):
-        return f"tomorrow {clock}"
-    return f"{local:%a} {local.day} {local:%b} {clock}"
-
-
-def _platform_label(platform: str) -> str:
-    return _PLATFORM_LABELS.get(platform.lower(), platform.title())
-
-
 def _parse_id(token: str) -> int | None:
     token = token.lstrip("#")
     return int(token) if token.isdigit() else None
@@ -251,7 +189,7 @@ def _minutes_arg(token: str) -> float | None:
     if token.isdigit():
         return int(token) if int(token) >= 1 else None
     delta = _duration(token)
-    return _minutes_value(delta) if delta else None
+    return echo.minutes_value(delta) if delta else None
 
 
 _BAD_CONFIRM = "confirm must be one word, an emoji, `any` or `contains:<word>`."
@@ -327,57 +265,6 @@ def target_from_source(source: Any) -> Target | None:
         return None
     user_id = getattr(source, "user_id", None)
     return Target(platform=name, chat_id=str(chat_id), user_id=str(user_id) if user_id else None)
-
-
-# -- echo ------------------------------------------------------------------------
-
-
-def _stop_text(rule: Any) -> str:
-    kind = rule.get("kind") if isinstance(rule, dict) else None
-    value = rule.get("value", "") if isinstance(rule, dict) else ""
-    if kind == "word":
-        return f'reply "{value}"'
-    if kind == "contains":
-        return f'reply with a message containing "{value}"'
-    if kind == "any":
-        return "reply with any message"
-    if kind == "emoji":
-        return f"send {value} (a message or a reaction)"
-    return 'reply "ok"'
-
-
-def render_echo(snooze: Snooze, now: datetime, where: str, capped: bool, cap_reminders: int) -> str:
-    """What the user sees after creating a snooze: local times, where, how to stop, how to undo."""
-    sched = snooze.schedule
-    first = _from_iso(sched.first_at)
-    until = _from_iso(sched.until)
-    zone = sched.tz
-    pending = snooze.state == PENDING
-
-    when = [format_when(first, zone, now)] if first else []
-    if sched.every:
-        when.append(f"every {format_minutes(sched.every)}")
-    if until:
-        stop = f"stops {format_when(until, zone, now, relative_to=first)}"
-        if capped:
-            stop += f" or after {cap_reminders} reminders"
-        when.append(stop)
-
-    lines = [
-        f"⏰ Snooze #{snooze.id} {'ready, not started' if pending else 'set'}",
-        f"What:     {snooze.text}",
-        f"When:     {', '.join(when)} ({zone})",
-        f'Stop it:  {_stop_text(snooze.confirm)} (or "later 30" to push it back)',
-    ]
-    if snooze.then:
-        lines.append(f'Then:     the agent will "{snooze.then}" and tell you the result')
-    lines.append(f"Where:    {_platform_label(snooze.target.platform)} ({where})")
-    lines.append(f"Undo:     /snooze cancel {snooze.id}")
-    if pending:
-        minutes = format_minutes(_minutes_value(PENDING_TIMEOUT))
-        lines.append(f"Waiting:  nothing is sent until you reply yes (within {minutes})")
-        lines.append(f"Reply `yes` to start it (or `/snooze yes {snooze.id}`).")
-    return "\n".join(lines)
 
 
 # -- the commands ------------------------------------------------------------------
@@ -481,7 +368,7 @@ class Commands:
             target=target,
             schedule=Schedule(
                 first_at=_iso(spec.first_at),
-                every=_minutes_value(spec.every or DEFAULT_EVERY),
+                every=echo.minutes_value(spec.every or DEFAULT_EVERY),
                 until=_iso(until),
                 tz=spec.tz,
             ),
@@ -496,12 +383,12 @@ class Commands:
         if target is None:
             return NO_TARGET_TEXT
         record, capped, settings, now = self._add(spec, target)
-        return render_echo(record, now, where, capped, settings.cap_reminders)
+        return echo.render_echo(record, now, where, capped, settings.cap_reminders, PENDING_TIMEOUT)
 
     def _create_from_tool(self, args: dict) -> dict:
         settings = read_settings(self._ctx)
         now = self._now()
-        zone = _zone(settings.timezone)
+        zone = echo.zone_of(settings.timezone)
 
         text = args.get("text")
         text = text.strip() if isinstance(text, str) else ""
@@ -550,7 +437,7 @@ class Commands:
             "ok": True,
             "id": record.id,
             "state": record.state,
-            "message": render_echo(record, now, where, capped, settings.cap_reminders),
+            "message": echo.render_echo(record, now, where, capped, settings.cap_reminders, PENDING_TIMEOUT),
             "note": (
                 "Show `message` to the user as it is. "
                 + (
@@ -604,11 +491,11 @@ class Commands:
                 if is_pending_expired(s, now):
                     detail = "waiting for yes, expired (not started)"
                 else:
-                    until = f", until {format_when(deadline, zone, now)}" if deadline else ""
+                    until = f", until {echo.format_when(deadline, zone, now)}" if deadline else ""
                     detail = f"waiting for yes{until}"
             else:
-                nxt = _from_iso(s.next_at)
-                detail = f"next {format_when(nxt, zone, now)}" if nxt else "no next reminder"
+                nxt = echo.from_iso(s.next_at)
+                detail = f"next {echo.format_when(nxt, zone, now)}" if nxt else "no next reminder"
                 detail += f", {s.sent_count} sent"
             if s.last_error:
                 detail += f" (last error: {s.last_error})"
@@ -653,10 +540,10 @@ class Commands:
             s, problem = self._select(txn, sid, ACTIVE)
             if problem:
                 return problem
-            delay = minutes if minutes is not None else (s.schedule.every or _minutes_value(DEFAULT_EVERY))
+            delay = minutes if minutes is not None else (s.schedule.every or echo.minutes_value(DEFAULT_EVERY))
             at = now + timedelta(minutes=delay)
             s.next_at = _iso(at)
-            return f"⏰ OK, back at {format_when(at, s.schedule.tz, now, relative_to=now)}: {s.text}"
+            return f"⏰ OK, back at {echo.format_when(at, s.schedule.tz, now, relative_to=now)}: {s.text}"
 
         return self._store().update(run)
 
@@ -690,8 +577,8 @@ class Commands:
                 s.state, s.next_at = MISSED, None
                 return not_started_message(s)
             s.state, s.next_at = ACTIVE, s.schedule.first_at
-            first = _from_iso(s.schedule.first_at)
-            when = f" First reminder: {format_when(first, s.schedule.tz, now)}." if first else ""
+            first = echo.from_iso(s.schedule.first_at)
+            when = f" First reminder: {echo.format_when(first, s.schedule.tz, now)}." if first else ""
             return f"▶️ Started #{s.id}: {s.text}.{when}"
 
         return self._store().update(run)
@@ -732,7 +619,7 @@ class Commands:
             return None, ("No snooze waiting for yes." if wanted == PENDING else "No running snooze.")
         if wanted == ACTIVE:
             epoch = datetime.min.replace(tzinfo=timezone.utc)
-            return max(pool, key=lambda s: (_from_iso(s.last_sent_at) or epoch, s.id)), None
+            return max(pool, key=lambda s: (echo.from_iso(s.last_sent_at) or epoch, s.id)), None
         return max(pool, key=lambda s: s.id), None
 
 
