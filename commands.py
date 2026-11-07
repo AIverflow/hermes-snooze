@@ -86,6 +86,8 @@ HELP = (
 NO_TARGET_TEXT = ("No chat to send reminders to: run this from a chat (Telegram, Discord, ...), "
                   "or set a home channel for the profile. Nothing was set.")
 
+OUT_OF_RANGE_TEXT = "⚠️ A date or number is out of range. Nothing was set."
+
 _PLATFORM_LABELS = {"whatsapp": "WhatsApp", "whatsapp_cloud": "WhatsApp Cloud", "sms": "SMS"}
 
 
@@ -446,6 +448,8 @@ class Commands:
             return self._dispatch((raw_args or "").strip(), source)
         except StoreError as exc:
             return f"⚠️ {exc}"
+        except (OverflowError, ValueError):
+            return OUT_OF_RANGE_TEXT
 
     def tool(self, args: Any, **_kwargs: Any) -> str:
         """Handler of the `snooze_create` tool. Returns a JSON string."""
@@ -453,6 +457,8 @@ class Commands:
             result = self._create_from_tool(args if isinstance(args, dict) else {})
         except StoreError as exc:
             result = {"error": str(exc)}
+        except (OverflowError, ValueError):
+            result = {"error": OUT_OF_RANGE_TEXT}
         return json.dumps(result, ensure_ascii=False)
 
     # -- command dispatch ------------------------------------------------------

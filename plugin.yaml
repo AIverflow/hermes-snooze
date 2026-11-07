@@ -3,6 +3,8 @@ version: "0.1.0"
 description: "A reminder that repeats on your phone until you confirm it, then can hand a follow-up to the agent. Zero LLM calls per reminder."
 author: the023
 requires_hermes: ">=0.22.7"
+provides_tools:
+  - snooze_create
 config_schema:
   validate_setup:
     type: bool
