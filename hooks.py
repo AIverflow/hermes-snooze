@@ -32,7 +32,7 @@ from typing import Any
 
 from . import commands
 from .confirm import CONFIRM, LATER, NONE, YES, Decision, Sender, match
-from .send import HermesSender
+from .send import HermesSender, start_timer
 from .send import Sender as ReplySender
 from .store import ACTIVE, PENDING, Snooze, Store, Target
 
@@ -121,7 +121,9 @@ class Hooks:
         now: Callable[[], datetime] = _utcnow,
         authorizes: Callable[[Any, Any], bool] = hermes_authorizes,
         sender: ReplySender | None = None,
+        ensure_timer: Callable[[], Any] | None = None,
     ):
+        self._ensure_timer = ensure_timer or (lambda: start_timer(ctx))
         self._data_dir = data_dir
         self._now = now
         self._authorizes = authorizes
@@ -133,6 +135,12 @@ class Hooks:
 
     async def pre_gateway_dispatch(self, event: Any = None, gateway: Any = None, **_context: Any) -> dict | None:
         """Hermes hook: `{"action": "skip"}` for a pure answer, None to let the message through."""
+        # This runs on the gateway loop, inside the profile's scope: the place `register()` cannot be
+        # (it runs on a loop-less loader thread), so the reminder timer is started from here. Idempotent.
+        try:
+            self._ensure_timer()
+        except Exception:
+            log.warning("snooze: could not start the reminder timer", exc_info=True)
         try:
             return await self._on_message(event, gateway)
         except Exception:

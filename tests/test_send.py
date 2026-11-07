@@ -306,11 +306,29 @@ class HermesSenderTest(unittest.TestCase):
             send.HermesSender().send(Target(platform="telegram", chat_id="1"), "hi")
 
 
+class FakeTask:
+    def __init__(self):
+        self._done = False
+
+    def done(self):
+        return self._done
+
+
+class MayStartTest(unittest.TestCase):
+    def test_only_without_a_live_task(self):
+        live, finished = FakeTask(), FakeTask()
+        finished._done = True
+        self.assertTrue(send.may_start(None))
+        self.assertTrue(send.may_start(finished))
+        self.assertFalse(send.may_start(live))
+
+
 class StartTest(unittest.TestCase):
     class Ctx:
         def __init__(self, error=None):
             self.error = error
             self.spawned = []
+            self.tasks = []
 
         def get_config(self, key, default=None):
             return default
@@ -320,6 +338,12 @@ class StartTest(unittest.TestCase):
                 raise self.error
             self.spawned.append((coro, name))
             coro.close()
+            self.tasks.append(FakeTask())
+            return self.tasks[-1]
+
+    def setUp(self):
+        send._timers.clear()
+        self.addCleanup(send._timers.clear)
 
     def gateway(self, running=True):
         module = types.ModuleType("gateway.run")
@@ -346,6 +370,39 @@ class StartTest(unittest.TestCase):
         ):
             self.assertTrue(send.start_timer(ctx))
         self.assertEqual([name for _, name in ctx.spawned], ["snooze:timer"])
+
+    def test_a_second_call_starts_nothing_while_the_task_lives(self):
+        ctx = self.Ctx()
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(), self.data_dir(tmp):
+            self.assertTrue(send.start_timer(ctx))
+            self.assertFalse(send.start_timer(ctx))
+            self.assertEqual(len(ctx.spawned), 1)
+            ctx.tasks[0]._done = True  # the task ended (plugin reloaded): a new one may start
+            self.assertTrue(send.start_timer(ctx))
+            self.assertEqual(len(ctx.spawned), 2)
+
+    def test_each_profile_gets_its_own_timer(self):
+        ctx = self.Ctx()
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b, self.gateway():
+            with self.data_dir(a):
+                self.assertTrue(send.start_timer(ctx))
+            with self.data_dir(b):
+                self.assertTrue(send.start_timer(ctx))
+        self.assertEqual(len(ctx.spawned), 2)
+
+    def test_every_outcome_is_logged(self):
+        with self.assertLogs("snooze.send", "INFO") as logs, mock.patch.dict(sys.modules, {"gateway.run": None}):
+            send.start_timer(self.Ctx())
+        self.assertIn("not in the gateway", logs.output[0])
+        with self.assertLogs("snooze.send", "INFO") as logs, tempfile.TemporaryDirectory() as tmp:
+            with self.gateway(), self.data_dir(tmp):
+                send.start_timer(self.Ctx(error=RuntimeError("no running event loop")))
+        self.assertIn("no running event loop", logs.output[0])
+        send._timers.clear()
+        with self.assertLogs("snooze.send", "INFO") as logs, tempfile.TemporaryDirectory() as tmp:
+            with self.gateway(), self.data_dir(tmp):
+                send.start_timer(self.Ctx())
+        self.assertIn("started", logs.output[0])
 
     def test_no_running_loop_means_not_started(self):
         ctx = self.Ctx(error=RuntimeError("no running event loop"))

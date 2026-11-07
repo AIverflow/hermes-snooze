@@ -72,7 +72,9 @@ class Base(unittest.IsolatedAsyncioTestCase):
         self.authorized = False
         self.sender = FakeSender()
         self.inject = FakeInject()
+        self.timer_starts = 0
         self.hooks = Hooks(
+            ensure_timer=self._ensure_timer,
             inject=self.inject,
             reply_grace=0,
             data_dir=lambda: self.dir,
@@ -80,6 +82,9 @@ class Base(unittest.IsolatedAsyncioTestCase):
             authorizes=self._authorizes,
             sender=self.sender,
         )
+
+    def _ensure_timer(self):
+        self.timer_starts += 1
 
     def _authorizes(self, gw, source):
         self.auth_calls += 1
@@ -112,6 +117,23 @@ class Base(unittest.IsolatedAsyncioTestCase):
 
 
 EMOJI = {"kind": "emoji", "value": "👍"}
+
+
+class TimerStartTest(Base):
+    async def test_every_inbound_message_asks_for_the_timer_even_slash_commands(self):
+        await self.hooks.pre_gateway_dispatch(event=event("hello"))
+        await self.hooks.pre_gateway_dispatch(event=event("/snooze test"))
+        self.assertEqual(self.timer_starts, 2)
+
+    async def test_a_failing_timer_start_does_not_stop_the_message(self):
+        def boom():
+            raise RuntimeError("no")
+
+        self.hooks._ensure_timer = boom
+        self.add()
+        with self.assertLogs("snooze.hooks", "WARNING"):
+            result = await self.hooks.pre_gateway_dispatch(event=event("ok"))
+        self.assertEqual(result, hooks.SKIP)
 
 
 class ThenTest(Base):

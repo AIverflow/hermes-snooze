@@ -175,7 +175,9 @@ class Timer:
 
     def _send(self, job: _Job) -> _Result:
         try:
-            return _Result(job, self.sender.send(job.target, job.text), None)
+            result = _Result(job, self.sender.send(job.target, job.text), None)
+            logger.info("snooze #%s: %s sent", job.snooze_id, job.action.kind)
+            return result
         except Exception as exc:  # any failure is a retry (or, for a miss, a `last_error`), never a crash
             logger.warning("snooze #%s: send failed: %s", job.snooze_id, exc)
             return _Result(job, None, _error_text(exc))
@@ -204,6 +206,7 @@ class Timer:
 
     async def run(self, interval: float = TICK_SECONDS) -> None:
         """Tick forever. Retries the sender lock each time, so another process takes over if the holder dies."""
+        logger.info("snooze timer: loop started (every %ss)", interval)
         try:
             while True:
                 try:
@@ -215,19 +218,35 @@ class Timer:
                 await asyncio.sleep(interval)
         finally:
             self.lock.release()
+            logger.info("snooze timer: loop stopped")
+
+
+# One timer per data directory (= per profile) in this process: `register()` and the first gateway
+# hook call may both ask for it. Keys are `str(data_dir)`.
+_timers: dict[str, Any] = {}
 
 
 def start_timer(ctx: Any) -> bool:
-    """Start the timer loop for the active profile. True if it was started.
+    """Start the timer loop for the active profile. True if it was started by this call.
 
     Only a gateway process runs it: it has the live adapters and gets the replies, and a CLI or
-    Desktop process that held the lock would keep the gateway from sending. `register()` runs once
-    per served profile, inside that profile's scope, so the data directory and the credentials the
-    task inherits are that profile's.
+    Desktop process that held the lock would keep the gateway from sending. The profile is the
+    active one (data directory and credentials the task inherits), so call it inside its scope.
+    Idempotent: a profile that already has a live timer task gets no second one.
+
+    `ctx.spawn_task` needs a running event loop, and Hermes runs `register()` on a plugin-load
+    worker thread that has none (hermes_cli/plugins_loader.py `run_with_load_deadline`). So
+    `register()` usually gets False here and the first `pre_gateway_dispatch` call (on the gateway
+    loop) starts the timer: see `hooks.Hooks.pre_gateway_dispatch`.
     """
     if not in_gateway():
+        logger.info("snooze timer: not started (not in the gateway)")
         return False
     data_dir = hermes_data_dir()
+    key = str(data_dir)
+    if not may_start(_timers.get(key)):
+        logger.debug("snooze timer: already running")
+        return False
     timer = Timer(
         Store(data_dir),
         HermesSender(),
@@ -237,8 +256,20 @@ def start_timer(ctx: Any) -> bool:
     )
     coro = timer.run()
     try:
-        ctx.spawn_task(coro, name="snooze:timer")
+        _timers[key] = ctx.spawn_task(coro, name="snooze:timer")
     except RuntimeError:  # no running event loop here
         coro.close()
+        logger.info("snooze timer: not started (no running event loop)")
         return False
+    except Exception:
+        coro.close()
+        logger.warning("snooze timer: not started (spawn failed)", exc_info=True)
+        return False
+    logger.info("snooze timer: started")
     return True
+
+
+def may_start(task: Any) -> bool:
+    """True if there is no live timer task (`task` is the one recorded for the profile, or None)."""
+    done = getattr(task, "done", None)
+    return task is None or done is None or bool(done())
