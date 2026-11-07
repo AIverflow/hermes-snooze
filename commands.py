@@ -29,13 +29,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import echo
 from . import parse as _parse
 from .parse import ConfirmRule, ParseError, Spec
+from .schedule import PENDING_TIMEOUT, apply_later, is_pending_expired, pending_deadline
 from .store import ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, Store, StoreError, Target, Txn
 
 PLUGIN_NAME = "snooze"
 TOOL_NAME = "snooze_create"
 
 DEFAULT_EVERY = timedelta(minutes=10)  # used when the text gives no `every`
-PENDING_TIMEOUT = timedelta(minutes=10)  # time the user has to reply `yes`
 
 DEFAULT_VALIDATE_SETUP = True
 DEFAULT_CAP_MINUTES = 120
@@ -139,23 +139,6 @@ def resolve_timezone(value: Any) -> str:
     if name and name.lower() != "system" and _valid_zone(name):
         return name
     return system_timezone()
-
-
-# -- pending snoozes: the `yes` window -----------------------------------------
-
-
-def pending_deadline(snooze: Snooze) -> datetime | None:
-    """When a pending snooze stops waiting for `yes` (creation + `PENDING_TIMEOUT`); None if `created` is unreadable."""
-    created = echo.from_iso(snooze.created)
-    return created + PENDING_TIMEOUT if created else None
-
-
-def is_pending_expired(snooze: Snooze, now: datetime) -> bool:
-    """True if `snooze` is still pending and its `yes` window has closed at `now`."""
-    if snooze.state != PENDING:
-        return False
-    deadline = pending_deadline(snooze)
-    return deadline is not None and now >= deadline
 
 
 def not_started_message(snooze: Snooze) -> str:
@@ -541,8 +524,7 @@ class Commands:
             if problem:
                 return problem
             delay = minutes if minutes is not None else (s.schedule.every or echo.minutes_value(DEFAULT_EVERY))
-            at = now + timedelta(minutes=delay)
-            s.next_at = _iso(at)
+            at = apply_later(s, now, delay)
             return f"⏰ OK, back at {echo.format_when(at, s.schedule.tz, now, relative_to=now)}: {s.text}"
 
         return self._store().update(run)

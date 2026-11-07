@@ -120,3 +120,25 @@ def render_echo(
         lines.append(f"Waiting:  nothing is sent until you reply yes (within {minutes})")
         lines.append(f"Reply `yes` to start it (or `/snooze yes {snooze.id}`).")
     return "\n".join(lines)
+
+
+def _ordinal(n: int) -> str:
+    """2 -> "2nd", 3 -> "3rd", 11 -> "11th"."""
+    suffix = "th" if n % 100 in (11, 12, 13) else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def reminder_text(snooze: Snooze, late_by: timedelta | None = None) -> str:
+    """The reminder message. The first one says how to answer; later ones say which number they are."""
+    count = snooze.sent_count + 1
+    tail = "  (reply ok / later)" if count == 1 else f" ({_ordinal(count)})"
+    text = f"🔔 {snooze.text}{tail}"
+    if late_by is not None:
+        text += f"\n⏰ late by {format_minutes(round(late_by.total_seconds() / 60))}"
+    return text
+
+
+def missed_text(snooze: Snooze) -> str:
+    """The message when a snooze ends without an answer."""
+    n = snooze.sent_count
+    return f"⌛ Missed: {snooze.text} ({n} reminder{'' if n == 1 else 's'}, no answer)"

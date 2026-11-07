@@ -365,6 +365,14 @@ class LaterTest(Base):
         self.run_cmd("later")
         self.assertEqual(self.store.load()[0].next_at, "2026-11-07T10:07:00+00:00")
 
+    def test_later_past_until_extends_until(self):
+        until = NOW + timedelta(minutes=10)
+        self.add(schedule=Schedule(first_at=NOW.isoformat(), every=7, until=until.isoformat(), tz="Europe/Paris"))
+        self.run_cmd("later 30")
+        saved = self.store.load()[0]
+        self.assertEqual(saved.next_at, "2026-11-07T10:30:00+00:00")
+        self.assertEqual(saved.schedule.until, "2026-11-07T10:37:00+00:00")
+
     def test_later_keeps_the_snooze_active(self):
         self.add()
         self.run_cmd("later 30")
@@ -475,40 +483,6 @@ class FallThroughTest(Base):
     def test_keywords_are_case_insensitive(self):
         self.add()
         self.assertEqual(self.run_cmd("OK"), "✅ Done: Wake up")
-
-
-class PendingExpiryTest(unittest.TestCase):
-    def snooze(self, state=PENDING, created=NOW):
-        return Snooze(
-            text="x",
-            created=created.isoformat(),
-            target=Target("telegram", "1", "1"),
-            schedule=Schedule(first_at=NOW.isoformat()),
-            state=state,
-        )
-
-    def test_deadline_is_created_plus_ten_minutes(self):
-        self.assertEqual(commands.pending_deadline(self.snooze()), NOW + timedelta(minutes=10))
-
-    def test_not_expired_before_the_deadline(self):
-        s = self.snooze()
-        self.assertFalse(commands.is_pending_expired(s, NOW))
-        self.assertFalse(commands.is_pending_expired(s, NOW + timedelta(minutes=9, seconds=59)))
-
-    def test_expired_at_the_deadline(self):
-        self.assertTrue(commands.is_pending_expired(self.snooze(), NOW + timedelta(minutes=10)))
-
-    def test_only_pending_snoozes_expire(self):
-        late = NOW + timedelta(hours=5)
-        for state in (ACTIVE, DONE, MISSED, CANCELLED):
-            with self.subTest(state=state):
-                self.assertFalse(commands.is_pending_expired(self.snooze(state=state), late))
-
-    def test_unreadable_created_never_expires(self):
-        s = self.snooze()
-        s.created = "garbage"
-        self.assertIsNone(commands.pending_deadline(s))
-        self.assertFalse(commands.is_pending_expired(s, NOW + timedelta(days=1)))
 
 
 class ToolTest(Base):
