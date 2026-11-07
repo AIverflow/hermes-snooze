@@ -96,11 +96,12 @@ The `ok` clause sets what stops the reminders:
 
 How replies are read:
 
-- **Only you can answer.** The chat and user must be the ones the reminder went to. Reactions carry no user id, so they are accepted in private chats only, and only for an emoji rule.
+- **Only you can answer.** The chat and user must be the ones the reminder went to. Reactions carry no user id, so they are accepted in private chats only, only for an emoji rule, and only on the latest reminder message.
 - **Matching is forgiving.** Case, spaces, punctuation, emoji variation selectors, skin tones and check-mark variants are ignored: `OK!`, `ok 👍🏽` and `✔️` match as you expect.
 - **`later` always wins.** `later`, `later 30`, `later 1h` and `not now` push the reminder back and are never taken as a confirm, even with `ok any`. Without a number the delay is the snooze interval.
 - **More text is not lost.** For the `ok`, word and emoji rules, `ok, and book a table for 8` confirms the snooze and also passes the message on to the agent. For `any` and `contains` the whole message is the answer and is consumed.
 - **Which snooze.** A reply to a reminder message picks that snooze. Otherwise it is the running snooze that sent last.
+- **Slash commands are never answers.** A message starting with `/` goes to Hermes as usual, whatever the `ok` rule.
 - **`yes`** (the whole message) starts a snooze that is waiting for validation.
 
 ## Agent tool

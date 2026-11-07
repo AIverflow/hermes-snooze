@@ -145,6 +145,33 @@ def not_started_message(snooze: Snooze) -> str:
     return f"⌛ Not started: {snooze.text}"
 
 
+# -- state changes shared with the gateway hooks (hooks.py) ---------------------
+# Each takes a record inside a store transaction, changes it, and returns the reply text.
+
+
+def confirm_snooze(snooze: Snooze) -> str:
+    """The user confirmed a running snooze: it is done."""
+    snooze.state, snooze.next_at = DONE, None
+    return f"✅ Done: {snooze.text}"
+
+
+def push_back_snooze(snooze: Snooze, now: datetime, minutes: float) -> str:
+    """The user asked for the next reminder in `minutes`."""
+    at = apply_later(snooze, now, minutes)
+    return f"⏰ OK, back at {echo.format_when(at, snooze.schedule.tz, now, relative_to=now)}: {snooze.text}"
+
+
+def start_snooze(snooze: Snooze, now: datetime) -> str:
+    """The user said `yes` to a pending snooze: it starts, unless its `yes` window has closed."""
+    if is_pending_expired(snooze, now):
+        snooze.state, snooze.next_at = MISSED, None
+        return not_started_message(snooze)
+    snooze.state, snooze.next_at = ACTIVE, snooze.schedule.first_at
+    first = echo.from_iso(snooze.schedule.first_at)
+    when = f" First reminder: {echo.format_when(first, snooze.schedule.tz, now)}." if first else ""
+    return f"▶️ Started #{snooze.id}: {snooze.text}.{when}"
+
+
 # -- small helpers -------------------------------------------------------------
 
 
@@ -499,8 +526,7 @@ class Commands:
             s, problem = self._select(txn, sid, ACTIVE)
             if problem:
                 return problem
-            s.state, s.next_at = DONE, None
-            return f"✅ Done: {s.text}"
+            return confirm_snooze(s)
 
         return self._store().update(run)
 
@@ -524,8 +550,7 @@ class Commands:
             if problem:
                 return problem
             delay = minutes if minutes is not None else (s.schedule.every or echo.minutes_value(DEFAULT_EVERY))
-            at = apply_later(s, now, delay)
-            return f"⏰ OK, back at {echo.format_when(at, s.schedule.tz, now, relative_to=now)}: {s.text}"
+            return push_back_snooze(s, now, delay)
 
         return self._store().update(run)
 
@@ -555,13 +580,7 @@ class Commands:
             s, problem = self._select(txn, sid, PENDING)
             if problem:
                 return problem
-            if is_pending_expired(s, now):
-                s.state, s.next_at = MISSED, None
-                return not_started_message(s)
-            s.state, s.next_at = ACTIVE, s.schedule.first_at
-            first = echo.from_iso(s.schedule.first_at)
-            when = f" First reminder: {echo.format_when(first, s.schedule.tz, now)}." if first else ""
-            return f"▶️ Started #{s.id}: {s.text}.{when}"
+            return start_snooze(s, now)
 
         return self._store().update(run)
 

@@ -5,6 +5,9 @@ author: the023
 requires_hermes: ">=0.22.7"
 provides_tools:
   - snooze_create
+provides_hooks:
+  - pre_gateway_dispatch
+  - gateway_platform_event
 config_schema:
   validate_setup:
     type: bool
