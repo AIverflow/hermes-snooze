@@ -4,12 +4,25 @@ import snooze
 
 
 class FakeCtx:
-    """Stand-in for the Hermes plugin context."""
+    """Stand-in for the Hermes plugin context: records what is registered."""
+
+    def __init__(self):
+        self.commands = {}
+        self.tools = {}
+
+    def register_command(self, name, handler, description="", args_hint="", argument_mode=None):
+        self.commands[name] = handler
+
+    def register_tool(self, name, toolset, schema, handler, **kwargs):
+        self.tools[name] = handler
 
 
 class RegisterTest(unittest.TestCase):
     def test_register_runs_with_fake_ctx(self):
-        self.assertIsNone(snooze.register(FakeCtx()))
+        ctx = FakeCtx()
+        self.assertIsNone(snooze.register(ctx))
+        self.assertEqual(list(ctx.commands), ["snooze"])
+        self.assertEqual(list(ctx.tools), ["snooze_create"])
 
 
 if __name__ == "__main__":
