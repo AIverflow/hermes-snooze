@@ -175,7 +175,7 @@ Snoozes are stored per profile in the plugin data directory:
 
 | What | Detail |
 |---|---|
-| Timer | One task in the gateway, every 15 seconds, started by the first inbound message after the gateway starts. It sends due reminders through Hermes's own send path (no LLM call). |
+| Timer | One task in the gateway, every 15 seconds, started when the gateway loads the plugin (the first inbound message is only a fallback). It sends due reminders through Hermes's own send path (no LLM call). |
 | Hooks | `pre_gateway_dispatch` and `gateway_platform_event` see every inbound gateway message and Telegram reaction before the agent. They only act on replies to a running snooze; all other messages pass untouched. |
 | Own messages | Reminders, `✅ Done`, `⌛ Missed` and `then` status lines, sent to the chat the snooze was created in. |
 | Reads outside its data | The Hermes pause flag, whether a gateway is running, and the profile's home channel (for snoozes made from the CLI). Read-only. |
@@ -184,7 +184,7 @@ Snoozes are stored per profile in the plugin data directory:
 ## Limits
 
 - **The gateway must run.** The timer runs only in the gateway of the profile (`hermes gateway start`), and the gateway is also what reads your replies. A CLI or Desktop session alone sends nothing. Run it on an always-on machine; a sleeping laptop sends nothing, and after wake-up one late reminder follows ("late by N min"). If no gateway runs, a new snooze's echo warns you, and `/snooze test` tells you.
-- **The timer starts with the first message.** After a gateway restart it starts when the first message arrives in the profile (any message, even a command). A reminder due before that goes out late, with "late by N min".
+- **The timer starts with the gateway.** It starts when the gateway loads the plugin, with no message needed. If the gateway loop is not ready at that point, it starts with the first message that arrives in the profile instead, and a reminder due before that goes out late, with "late by N min".
 - **`hermes pause` holds reminders.** While Hermes is paused, no reminder is sent; `/snooze list` shows "paused". After `hermes resume`, one late reminder follows per snooze, not a burst.
 - Do Not Disturb on your phone is your job: allow the bot's notifications, and do not mute the chat. The plugin cannot get through a muted chat.
 - Voice-note confirms are not supported: only text, emoji and reactions count.

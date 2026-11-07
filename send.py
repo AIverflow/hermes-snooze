@@ -226,6 +226,22 @@ class Timer:
 _timers: dict[str, Any] = {}
 
 
+def gateway_loop() -> asyncio.AbstractEventLoop | None:
+    """The gateway's own event loop if it is up, else None.
+
+    The runner stores it in `_gateway_loop` before it loads the plugins (gateway/run_startup.py
+    `_start_log_startup_environment`, then `_start_recover_previous_run`), and Hermes itself
+    schedules onto it from other threads (gateway/run_plugin_injection.py).
+    """
+    module = sys.modules.get("gateway.run")
+    ref = getattr(module, "_gateway_runner_ref", None)
+    runner = ref() if ref is not None else None
+    loop = getattr(runner, "_gateway_loop", None)
+    if loop is None or loop.is_closed() or not loop.is_running():
+        return None
+    return loop
+
+
 def start_timer(ctx: Any) -> bool:
     """Start the timer loop for the active profile. True if it was started by this call.
 
@@ -234,10 +250,12 @@ def start_timer(ctx: Any) -> bool:
     active one (data directory and credentials the task inherits), so call it inside its scope.
     Idempotent: a profile that already has a live timer task gets no second one.
 
-    `ctx.spawn_task` needs a running event loop, and Hermes runs `register()` on a plugin-load
-    worker thread that has none (hermes_cli/plugins_loader.py `run_with_load_deadline`). So
-    `register()` usually gets False here and the first `pre_gateway_dispatch` call (on the gateway
-    loop) starts the timer: see `hooks.Hooks.pre_gateway_dispatch`.
+    Two routes. With a running loop in this thread, `ctx.spawn_task`: Hermes supervises the task and
+    cancels it on unload. Hermes runs `register()` on a plugin-load worker thread that has no loop
+    (hermes_cli/plugins_loader.py `run_with_load_deadline`), so there the task is handed to the
+    gateway's loop with `run_coroutine_threadsafe`. That call copies this thread's contextvars
+    (`call_soon_threadsafe` with no context), so the task keeps the profile scope. If the gateway loop
+    is not up either, the first `pre_gateway_dispatch` call starts the timer: see `hooks.Hooks`.
     """
     if not in_gateway():
         logger.info("snooze timer: not started (not in the gateway)")
@@ -246,6 +264,15 @@ def start_timer(ctx: Any) -> bool:
     key = str(data_dir)
     if not may_start(_timers.get(key)):
         logger.debug("snooze timer: already running")
+        return False
+    try:
+        asyncio.get_running_loop()
+        on_this_loop = True
+    except RuntimeError:
+        on_this_loop = False
+    loop = None if on_this_loop else gateway_loop()
+    if not on_this_loop and loop is None:
+        logger.info("snooze timer: not started (gateway loop not ready)")
         return False
     timer = Timer(
         Store(data_dir),
@@ -256,16 +283,15 @@ def start_timer(ctx: Any) -> bool:
     )
     coro = timer.run()
     try:
-        _timers[key] = ctx.spawn_task(coro, name="snooze:timer")
-    except RuntimeError:  # no running event loop here
+        if loop is None:
+            _timers[key] = ctx.spawn_task(coro, name="snooze:timer")
+        else:
+            _timers[key] = asyncio.run_coroutine_threadsafe(coro, loop)
+    except Exception:  # a closed loop, or a Hermes without spawn_task
         coro.close()
-        logger.info("snooze timer: not started (no running event loop)")
+        logger.warning("snooze timer: not started (scheduling failed)", exc_info=True)
         return False
-    except Exception:
-        coro.close()
-        logger.warning("snooze timer: not started (spawn failed)", exc_info=True)
-        return False
-    logger.info("snooze timer: started")
+    logger.info("snooze timer: started" if loop is None else "snooze timer: started on the gateway loop")
     return True
 
 

@@ -135,8 +135,8 @@ class Hooks:
 
     async def pre_gateway_dispatch(self, event: Any = None, gateway: Any = None, **_context: Any) -> dict | None:
         """Hermes hook: `{"action": "skip"}` for a pure answer, None to let the message through."""
-        # This runs on the gateway loop, inside the profile's scope: the place `register()` cannot be
-        # (it runs on a loop-less loader thread), so the reminder timer is started from here. Idempotent.
+        # Fallback start: `register()` normally hops onto the gateway loop (send.start_timer), but if that
+        # loop was not ready then, the first message starts the timer from here, on the loop. Idempotent.
         try:
             self._ensure_timer()
         except Exception:

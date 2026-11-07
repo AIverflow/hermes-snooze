@@ -1,8 +1,11 @@
 import asyncio
+import contextvars
+import inspect
 import json
 import logging
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -323,6 +326,27 @@ class MayStartTest(unittest.TestCase):
         self.assertFalse(send.may_start(live))
 
 
+class FakeLoop:
+    def __init__(self, running=True, closed=False):
+        self.running = running
+        self.closed = closed
+
+    def is_running(self):
+        return self.running
+
+    def is_closed(self):
+        return self.closed
+
+
+def in_loop(fn):
+    """Call `fn()` from inside a running event loop (the thread `spawn_task` needs)."""
+
+    async def main():
+        return fn()
+
+    return asyncio.run(main())
+
+
 class StartTest(unittest.TestCase):
     class Ctx:
         def __init__(self, error=None):
@@ -344,14 +368,31 @@ class StartTest(unittest.TestCase):
     def setUp(self):
         send._timers.clear()
         self.addCleanup(send._timers.clear)
+        self.hops = []  # (coro, loop) handed to run_coroutine_threadsafe
+        self.tasks = []
+        self.hop_error = None
 
-    def gateway(self, running=True):
+    def gateway(self, running=True, loop=None):
+        runner = types.SimpleNamespace(_gateway_loop=loop)
         module = types.ModuleType("gateway.run")
-        module._gateway_runner_ref = lambda: object() if running else None
+        module._gateway_runner_ref = lambda: runner if running else None
         return mock.patch.dict(sys.modules, {"gateway": types.ModuleType("gateway"), "gateway.run": module})
 
     def data_dir(self, tmp):
         return mock.patch.object(send, "hermes_data_dir", lambda: tmp)
+
+    def fake_hop(self):
+        """Replace run_coroutine_threadsafe: record the call instead of touching a loop."""
+
+        def hop(coro, loop):
+            self.hops.append((coro, loop))
+            if self.hop_error:
+                raise self.hop_error  # the caller must close the coroutine
+            coro.close()
+            self.tasks.append(FakeTask())
+            return self.tasks[-1]
+
+        return mock.patch.object(send.asyncio, "run_coroutine_threadsafe", hop)
 
     def test_not_started_outside_the_gateway(self):
         ctx = self.Ctx()
@@ -361,34 +402,91 @@ class StartTest(unittest.TestCase):
             self.assertFalse(send.start_timer(ctx))
         self.assertEqual(ctx.spawned, [])
 
-    def test_started_in_the_gateway(self):
+    def test_a_running_loop_here_uses_spawn_task(self):
         ctx = self.Ctx()
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            self.gateway(),
-            mock.patch.object(send, "hermes_data_dir", lambda: tmp),
-        ):
-            self.assertTrue(send.start_timer(ctx))
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(), self.data_dir(tmp), self.fake_hop():
+            self.assertTrue(in_loop(lambda: send.start_timer(ctx)))
         self.assertEqual([name for _, name in ctx.spawned], ["snooze:timer"])
+        self.assertEqual(self.hops, [])
 
     def test_a_second_call_starts_nothing_while_the_task_lives(self):
         ctx = self.Ctx()
         with tempfile.TemporaryDirectory() as tmp, self.gateway(), self.data_dir(tmp):
-            self.assertTrue(send.start_timer(ctx))
-            self.assertFalse(send.start_timer(ctx))
-            self.assertEqual(len(ctx.spawned), 1)
-            ctx.tasks[0]._done = True  # the task ended (plugin reloaded): a new one may start
-            self.assertTrue(send.start_timer(ctx))
-            self.assertEqual(len(ctx.spawned), 2)
+
+            def scenario():
+                self.assertTrue(send.start_timer(ctx))
+                self.assertFalse(send.start_timer(ctx))
+                self.assertEqual(len(ctx.spawned), 1)
+                ctx.tasks[0]._done = True  # the task ended (plugin reloaded): a new one may start
+                self.assertTrue(send.start_timer(ctx))
+                self.assertEqual(len(ctx.spawned), 2)
+
+            in_loop(scenario)
 
     def test_each_profile_gets_its_own_timer(self):
         ctx = self.Ctx()
         with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b, self.gateway():
-            with self.data_dir(a):
-                self.assertTrue(send.start_timer(ctx))
-            with self.data_dir(b):
-                self.assertTrue(send.start_timer(ctx))
+
+            def scenario():
+                with self.data_dir(a):
+                    self.assertTrue(send.start_timer(ctx))
+                with self.data_dir(b):
+                    self.assertTrue(send.start_timer(ctx))
+
+            in_loop(scenario)
         self.assertEqual(len(ctx.spawned), 2)
+
+    def test_no_loop_here_hops_onto_the_gateway_loop(self):
+        ctx, loop = self.Ctx(), FakeLoop()
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=loop), self.data_dir(tmp), self.fake_hop():
+            with self.assertLogs("snooze.send", "INFO") as logs:
+                self.assertTrue(send.start_timer(ctx))
+        self.assertEqual([hop_loop for _, hop_loop in self.hops], [loop])
+        self.assertEqual(ctx.spawned, [])
+        self.assertIn("started on the gateway loop", logs.output[0])
+
+    def test_a_second_call_does_not_hop_twice(self):
+        ctx = self.Ctx()
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=FakeLoop()), self.data_dir(tmp), self.fake_hop():
+            self.assertTrue(send.start_timer(ctx))
+            self.assertFalse(send.start_timer(ctx))
+            self.assertEqual(len(self.hops), 1)
+            self.tasks[0]._done = True
+            self.assertTrue(send.start_timer(ctx))
+            self.assertEqual(len(self.hops), 2)
+
+    def test_no_gateway_loop_means_not_started(self):
+        for loop in (None, FakeLoop(closed=True), FakeLoop(running=False)):
+            with self.subTest(loop=loop):
+                ctx = self.Ctx()
+                with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=loop), self.data_dir(tmp):
+                    with self.fake_hop(), self.assertLogs("snooze.send", "INFO") as logs:
+                        self.assertFalse(send.start_timer(ctx))
+                self.assertIn("gateway loop not ready", logs.output[0])
+                self.assertEqual((ctx.spawned, self.hops, send._timers), ([], [], {}))
+
+    def test_a_failed_hop_closes_the_coroutine(self):
+        self.hop_error = RuntimeError("Event loop is closed")
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=FakeLoop()), self.data_dir(tmp):
+            with self.fake_hop(), self.assertLogs("snooze.send", "WARNING") as logs:
+                self.assertFalse(send.start_timer(self.Ctx()))
+        self.assertIn("scheduling failed", logs.output[0])
+        self.assertEqual(inspect.getcoroutinestate(self.hops[0][0]), inspect.CORO_CLOSED)
+        self.assertEqual(send._timers, {})
+
+    def test_a_failed_spawn_closes_the_coroutine(self):
+        ctx = self.Ctx(error=RuntimeError("boom"))
+        seen = []
+        original = send.Timer.run
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            self.gateway(),
+            self.data_dir(tmp),
+            mock.patch.object(send.Timer, "run", lambda timer: seen.append(original(timer)) or seen[-1]),
+            self.assertLogs("snooze.send", "WARNING"),
+        ):
+            self.assertFalse(in_loop(lambda: send.start_timer(ctx)))
+        self.assertEqual(inspect.getcoroutinestate(seen[0]), inspect.CORO_CLOSED)
 
     def test_every_outcome_is_logged(self):
         with self.assertLogs("snooze.send", "INFO") as logs, mock.patch.dict(sys.modules, {"gateway.run": None}):
@@ -396,22 +494,51 @@ class StartTest(unittest.TestCase):
         self.assertIn("not in the gateway", logs.output[0])
         with self.assertLogs("snooze.send", "INFO") as logs, tempfile.TemporaryDirectory() as tmp:
             with self.gateway(), self.data_dir(tmp):
-                send.start_timer(self.Ctx(error=RuntimeError("no running event loop")))
-        self.assertIn("no running event loop", logs.output[0])
-        send._timers.clear()
+                send.start_timer(self.Ctx())
+        self.assertIn("gateway loop not ready", logs.output[0])
         with self.assertLogs("snooze.send", "INFO") as logs, tempfile.TemporaryDirectory() as tmp:
             with self.gateway(), self.data_dir(tmp):
-                send.start_timer(self.Ctx())
-        self.assertIn("started", logs.output[0])
+                in_loop(lambda: send.start_timer(self.Ctx()))
+        self.assertEqual(logs.output[0].split(":", 2)[2], "snooze timer: started")
 
-    def test_no_running_loop_means_not_started(self):
-        ctx = self.Ctx(error=RuntimeError("no running event loop"))
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            self.gateway(),
-            mock.patch.object(send, "hermes_data_dir", lambda: tmp),
-        ):
-            self.assertFalse(send.start_timer(ctx))
+    def test_the_timer_really_runs_on_the_gateway_loop_with_the_callers_context(self):
+        scope = contextvars.ContextVar("scope", default="unset")
+        seen = {}
+        ran = threading.Event()
+
+        async def fake_run(timer, interval=0):
+            seen["loop"] = asyncio.get_running_loop()
+            seen["thread"] = threading.current_thread()
+            seen["scope"] = scope.get()
+            ran.set()
+
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        self.addCleanup(loop.close)  # cleanups run last-in first: stop, join, then close
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(loop.call_soon_threadsafe, loop.stop)
+        started = threading.Event()
+        loop.call_soon_threadsafe(started.set)  # the loop is running once this fires
+        self.assertTrue(started.wait(5))
+        ctx = self.Ctx()
+
+        def register_like_hermes():
+            # A loader thread: no loop of its own, a profile scope set in its context.
+            scope.set("profile-a")
+            with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=loop), self.data_dir(tmp):
+                with mock.patch.object(send.Timer, "run", fake_run):
+                    self.result = send.start_timer(ctx)
+                    self.assertTrue(ran.wait(5))
+
+        worker = threading.Thread(target=register_like_hermes)
+        worker.start()
+        worker.join(10)
+        self.assertTrue(self.result)
+        self.assertIs(seen["loop"], loop)
+        self.assertIs(seen["thread"], thread)
+        self.assertEqual(seen["scope"], "profile-a")
+        self.assertEqual(ctx.spawned, [])
 
 
 class RunTest(TimerCase):
