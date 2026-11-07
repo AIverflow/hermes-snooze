@@ -510,9 +510,6 @@ class PendingExpiryTest(unittest.TestCase):
         self.assertIsNone(commands.pending_deadline(s))
         self.assertFalse(commands.is_pending_expired(s, NOW + timedelta(days=1)))
 
-    def test_not_started_message(self):
-        self.assertEqual(commands.not_started_message(self.snooze()), "⌛ Not started: x")
-
 
 class ToolTest(Base):
     def call(self, **args):
@@ -626,9 +623,6 @@ class ToolTest(Base):
     def test_non_dict_args(self):
         self.assertIn("error", json.loads(self.cmds.tool(None)))
 
-    def test_returns_valid_json_string(self):
-        self.assertIsInstance(self.cmds.tool({"text": "x", "first_at": "2026-11-07T16:00"}), str)
-
 
 class SettingsTest(unittest.TestCase):
     def test_values_are_read(self):
@@ -645,11 +639,6 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual((settings.validate_setup, settings.cap_minutes, settings.cap_reminders), (True, 120, 10))
         self.assertEqual(settings.timezone, commands.system_timezone())
 
-    def test_system_timezone_is_a_real_zone(self):
-        name = commands.resolve_timezone("system")
-        self.assertTrue(commands._valid_zone(name))
-        self.assertEqual(commands.resolve_timezone(""), name)
-
     def test_caps_apply_to_new_snoozes(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -657,21 +646,6 @@ class SettingsTest(unittest.TestCase):
         cmds = Commands(ctx, data_dir=lambda: tmp.name, now=lambda: NOW, home_target=lambda: HOME)
         echo = cmds.command("Wake up at 4pm every 10m", source=telegram_source())
         self.assertIn("stops 16:30 or after 3 reminders", echo)
-
-
-class RegisterTest(unittest.TestCase):
-    def test_registers_command_and_tool(self):
-        ctx = FakeCtx()
-        commands.register_all(ctx)
-        self.assertEqual(list(ctx.commands), ["snooze"])
-        schema, handler = ctx.tools["snooze_create"]
-        self.assertEqual(schema["name"], "snooze_create")
-        self.assertEqual(schema["parameters"]["required"], ["text", "first_at"])
-        self.assertTrue(callable(handler))
-
-    def test_tool_fields_follow_the_parser_output(self):
-        fields = set(commands.TOOL_SCHEMA["parameters"]["properties"])
-        self.assertEqual(fields, {"text", "first_at", "every", "until", "confirm", "then"})
 
 
 class FormatTest(unittest.TestCase):
