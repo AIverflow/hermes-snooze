@@ -336,6 +336,30 @@ class OkTest(Base):
         self.add(text="Never sent")
         self.assertEqual(self.run_cmd("ok"), "✅ Done: Recent")
 
+    def test_ok_with_then_in_a_chat_says_now_and_runs_it_for_the_snooze_chat(self):
+        self.add(then="close ticket 42", next_at=NOW.isoformat())
+        calls = []
+        cmds = Commands(self.ctx, data_dir=lambda: self.dir, now=lambda: NOW, run_then=lambda s, src: calls.append(s))
+        reply = cmds.command("ok", source=telegram_source())
+        self.assertEqual(reply, "✅ Done: Wake up. Now: close ticket 42…")
+        self.assertEqual([(s.id, s.then, s.state) for s in calls], [(1, "close ticket 42", DONE)])
+
+    def test_ok_with_then_from_the_cli_does_not_run_it_and_says_so(self):
+        self.add(then="close ticket 42", next_at=NOW.isoformat())
+        calls = []
+        cmds = Commands(self.ctx, data_dir=lambda: self.dir, now=lambda: NOW, run_then=lambda s, src: calls.append(s))
+        reply = cmds.command("ok", source=None)
+        self.assertEqual(calls, [])
+        self.assertEqual(reply, f"✅ Done: Wake up\n{commands.THEN_NOT_RUN_TEXT}")
+        self.assertEqual(self.store.load()[0].state, DONE)
+
+    def test_ok_without_then_never_calls_the_runner(self):
+        self.add(next_at=NOW.isoformat())
+        calls = []
+        cmds = Commands(self.ctx, data_dir=lambda: self.dir, now=lambda: NOW, run_then=lambda s, src: calls.append(s))
+        self.assertEqual(cmds.command("ok", source=telegram_source()), "✅ Done: Wake up")
+        self.assertEqual(calls, [])
+
     def test_ok_nothing_running(self):
         self.assertEqual(self.run_cmd("ok"), "No running snooze.")
 

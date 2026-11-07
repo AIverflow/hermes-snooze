@@ -13,8 +13,8 @@ def register(ctx):
     """
     from . import commands, hooks, send
 
-    commands.register_all(ctx)
-    hooks.register_all(ctx)
+    handlers = hooks.register_all(ctx)
+    commands.register_all(ctx, run_then=handlers.then_after_reply)
     try:
         send.start_timer(ctx)
     except Exception:  # the commands still work without the timer

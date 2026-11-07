@@ -17,6 +17,7 @@ A pending snooze that gets no `yes` within `PENDING_TIMEOUT` is not started
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from collections.abc import Callable
@@ -34,6 +35,8 @@ from .store import ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, S
 
 PLUGIN_NAME = "snooze"
 TOOL_NAME = "snooze_create"
+
+THEN_NOT_RUN_TEXT = "⚠️ The then-action was not run: it runs only when you confirm from the chat."
 
 DEFAULT_EVERY = timedelta(minutes=10)  # used when the text gives no `every`
 
@@ -154,6 +157,8 @@ def not_started_message(snooze: Snooze) -> str:
 def confirm_snooze(snooze: Snooze) -> str:
     """The user confirmed a running snooze: it is done."""
     snooze.state, snooze.next_at = DONE, None
+    if snooze.then:
+        return f"✅ Done: {snooze.text}. Now: {snooze.then}…"
     return f"✅ Done: {snooze.text}"
 
 
@@ -308,6 +313,7 @@ class Commands:
         home_target: Callable[[], Target | None] = hermes_home_target,
         session_env: Callable[[str], str] = hermes_session_env,
         is_paused: Callable[[], bool] = hermes_paused,
+        run_then: Callable[[Snooze, Any], None] | None = None,
     ):
         self._ctx = ctx
         self._data_dir = data_dir
@@ -315,6 +321,7 @@ class Commands:
         self._home_target = home_target
         self._session_env = session_env
         self._is_paused = is_paused
+        self._run_then = run_then  # hands a confirmed snooze's `then` to the agent (hooks.Hooks.then_after_reply)
 
     # -- entry points --------------------------------------------------------
 
@@ -346,7 +353,7 @@ class Commands:
         name = name.lower()
 
         if name in SUBCOMMANDS:
-            reply = getattr(self, f"_cmd_{name}")(args)
+            reply = self._cmd_ok(args, source) if name == "ok" else getattr(self, f"_cmd_{name}")(args)
             if reply is not None:
                 return reply
             # The arguments do not fit the subcommand. "cancel the order at 4pm" is still a reminder.
@@ -533,18 +540,29 @@ class Commands:
             return None
         return "🧪 `/snooze test` is not available yet."
 
-    def _cmd_ok(self, rest: list) -> str | None:
+    def _cmd_ok(self, rest: list, source: Any = None) -> str | None:
         sid = self._optional_id(rest)
         if sid is False:
             return None
+        confirmed: list[Snooze] = []
 
         def run(txn: Txn) -> str:
             s, problem = self._select(txn, sid, ACTIVE)
             if problem:
                 return problem
-            return confirm_snooze(s)
+            reply = confirm_snooze(s)
+            if s.then:
+                confirmed.append(dataclasses.replace(s))
+            return reply
 
-        return self._store().update(run)
+        reply = self._store().update(run)
+        if not confirmed:
+            return reply
+        if self._run_then is None or target_from_source(source) is None:
+            # No chat to run the agent turn in (CLI / Desktop): see README, "The then action".
+            return f"✅ Done: {confirmed[0].text}\n{THEN_NOT_RUN_TEXT}"
+        self._run_then(confirmed[0], source)
+        return reply
 
     def _cmd_later(self, rest: list) -> str | None:
         if len(rest) > 2:
@@ -694,9 +712,9 @@ TOOL_SCHEMA = {
 }
 
 
-def register_all(ctx: Any) -> Commands:
+def register_all(ctx: Any, run_then: Callable[[Snooze, Any], None] | None = None) -> Commands:
     """Register the `/snooze` command and the `snooze_create` tool on `ctx`."""
-    handlers = Commands(ctx)
+    handlers = Commands(ctx, run_then=run_then)
     ctx.register_command(
         "snooze",
         handlers.command,

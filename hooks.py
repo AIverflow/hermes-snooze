@@ -12,7 +12,8 @@ read, no lock):
 - `pre_gateway_dispatch` (async): runs before authorization and before the busy-session
   lane, so an answer counts while the agent is busy. A pure answer is dropped (`skip`);
   "ok, and tell me a joke" is answered and still passes on to the agent. Slash commands
-  are never read as an answer.
+  are never read as an answer. If the snooze has a `then`, the message is rewritten into
+  the agent turn instead (`THEN_PROMPT`).
 - `gateway_platform_event` (sync): a Telegram reaction on the last reminder message. It
   carries no user id and no chat type, so only private chats are accepted: Telegram
   gives them positive chat ids. Hermes has already authorized the reactor.
@@ -24,6 +25,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -41,8 +43,15 @@ SKIP = {"action": "skip", "reason": "snooze: answer to a reminder"}
 _background_tasks: set = set()  # strong references: the event loop keeps only weak ones
 
 
-def run_then(snooze: Snooze) -> None:
-    """Call point for the `then` action (T11): called once the user confirmed and "✅ Done" is sent."""
+# What the agent receives (PLAN §5). The behaviour is documented in the README ("The then action").
+THEN_PROMPT = (
+    "The user confirmed the reminder '{text}'. Now do this: {then}. Then tell the user the result in one line."
+)
+INJECT_REFUSED = (
+    "Hermes did not accept the turn. Set plugins.entries.snooze.allow_gateway_injection: true "
+    "and make sure the gateway is running."
+)
+REPLY_GRACE_SECONDS = 1.0  # a command's reply is sent after its handler returns: let it go first
 
 
 def _utcnow() -> datetime:
@@ -79,12 +88,35 @@ def hermes_authorizes(gateway: Any, source: Any) -> bool:
         return False
 
 
+def then_origin(target: Target, source: Any = None) -> dict:
+    """The chat the agent turn runs in, in the `SessionSource.to_dict()` shape `inject_message` takes.
+
+    The reminder's chat is the target. When the confirming message comes from that same chat, its
+    own chat type, user and thread are used, so the turn lands in the session the user is talking
+    in. Without a source (a reaction) a private chat is assumed: reactions are accepted in those only.
+    """
+    origin: dict = {"platform": str(target.platform).lower(), "chat_id": str(target.chat_id), "chat_type": "dm"}
+    if target.user_id:
+        origin["user_id"] = str(target.user_id)
+    if source is not None:
+        platform = str(getattr(source.platform, "value", source.platform) or "").lower()
+        if platform == origin["platform"] and str(source.chat_id) == origin["chat_id"]:
+            for name in ("chat_type", "user_id", "user_name", "thread_id"):
+                value = getattr(source, name, None)
+                if value:
+                    origin[name] = str(value)
+    return origin
+
+
 class Hooks:
-    """The two gateway hooks. The keyword arguments are the seams used by the tests."""
+    """The two gateway hooks, and the `then` action. The keyword arguments are the seams used by the tests."""
 
     def __init__(
         self,
+        ctx: Any = None,
         *,
+        inject: Callable[..., bool] | None = None,
+        reply_grace: float = REPLY_GRACE_SECONDS,
         data_dir: Callable[[], str | os.PathLike] = commands.hermes_data_dir,
         now: Callable[[], datetime] = _utcnow,
         authorizes: Callable[[Any, Any], bool] = hermes_authorizes,
@@ -94,6 +126,8 @@ class Hooks:
         self._now = now
         self._authorizes = authorizes
         self._sender = sender or HermesSender()
+        self._inject = inject or getattr(ctx, "inject_message", None)
+        self._reply_grace = reply_grace
 
     # -- pre_gateway_dispatch ---------------------------------------------------
 
@@ -128,8 +162,13 @@ class Hooks:
             return None  # the snooze changed since it was read: let the message through
         reply, snooze = applied
         await self._reply(snooze.target, reply)
-        if decision.action == CONFIRM:
-            run_then(snooze)
+        if decision.action == CONFIRM and snooze.then:
+            # The user's own message becomes the agent turn: right session, normal authorization, and
+            # no `allow_gateway_injection` needed (gateway/run_inbound_hooks.py:69-110, the `rewrite` action).
+            prompt = THEN_PROMPT.format(text=snooze.text, then=snooze.then)
+            if decision.pass_through:
+                prompt += f"\nThe user also wrote: {text}"
+            return {"action": "rewrite", "text": prompt}
         return None if decision.pass_through else SKIP
 
     @staticmethod
@@ -187,15 +226,20 @@ class Hooks:
         if applied is None:
             return
         reply, snooze = applied
-        self._send_in_background(snooze.target, reply)
-        run_then(snooze)
+        self._spawn(self._reply_then(snooze, reply))
 
-    def _send_in_background(self, target: Target, text: str) -> None:
-        """Reply from the sync hook: a task on the running gateway loop, which keeps the profile scope."""
+    async def _reply_then(self, snooze: Snooze, reply: str) -> None:
+        """Send the reply, then run the `then` action: in this order, in one task."""
+        await self._reply(snooze.target, reply)
+        await self.run_then(snooze)
+
+    def _spawn(self, coro: Any) -> None:
+        """Run `coro` as a task on the running gateway loop, which keeps the profile scope."""
         try:
-            task = asyncio.get_running_loop().create_task(self._reply(target, text))
+            task = asyncio.get_running_loop().create_task(coro)
         except RuntimeError:
-            log.warning("snooze: no running loop to send %r", text)
+            coro.close()
+            log.warning("snooze: no running loop to send the reply")
             return
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
@@ -232,6 +276,53 @@ class Hooks:
 
         return Store(self._data_dir()).update(run)
 
+    # -- the then action ----------------------------------------------------------
+
+    def _inject_then(self, snooze: Snooze, source: Any = None) -> str | None:
+        """Queue the agent turn for a confirmed snooze. None if Hermes took it, else why not."""
+        if self._inject is None:
+            return "this Hermes has no inject_message"
+        try:
+            prompt = THEN_PROMPT.format(text=snooze.text, then=snooze.then)
+            accepted = self._inject(prompt, origin=then_origin(snooze.target, source))
+        except Exception as exc:
+            log.warning("snooze: then-action failed", exc_info=True)
+            return f"{type(exc).__name__}: {exc}"
+        return None if accepted else INJECT_REFUSED
+
+    async def run_then(self, snooze: Snooze, source: Any = None) -> None:
+        """Hand the `then` action of a confirmed snooze to the agent, in the reminder's chat.
+
+        For the paths with no user message to rewrite (a reaction): a text confirm rewrites the
+        message instead (`_on_message`). Called after "✅ Done" is sent, on the gateway loop.
+        `inject_message` queues one agent turn in that chat (in this plugin's own profile); it needs
+        `allow_gateway_injection` and only works inside the gateway. If Hermes refuses or fails, the chat gets
+        "⚠️ then-action failed: <reason>". See the README ("The then action").
+        """
+        if not snooze.then:
+            return
+        reason = self._inject_then(snooze, source)
+        if reason:
+            await self._reply(snooze.target, f"⚠️ then-action failed: {reason}")
+
+    def then_after_reply(self, snooze: Snooze, source: Any = None) -> None:
+        """`run_then` for a `/snooze ok` command, which runs in a worker thread.
+
+        The command's reply is sent after its handler returns, so the action waits a moment.
+        """
+        timer = threading.Timer(self._reply_grace, self._then_in_thread, (snooze, source))
+        timer.daemon = True
+        timer.start()
+
+    def _then_in_thread(self, snooze: Snooze, source: Any) -> None:
+        reason = self._inject_then(snooze, source) if snooze.then else None
+        if not reason:
+            return
+        try:
+            self._sender.send(snooze.target, f"⚠️ then-action failed: {reason}")
+        except Exception:
+            log.warning("snooze: could not send the then-action failure", exc_info=True)
+
 
 # -- registration ----------------------------------------------------------------------
 
@@ -240,7 +331,7 @@ HOOK_NAMES = ("pre_gateway_dispatch", "gateway_platform_event")
 
 def register_all(ctx: Any) -> Hooks:
     """Register the gateway hooks on `ctx` (`HOOK_NAMES`, also listed in plugin.yaml)."""
-    hooks = Hooks()
+    hooks = Hooks(ctx)
     ctx.register_hook("pre_gateway_dispatch", hooks.pre_gateway_dispatch)
     ctx.register_hook("gateway_platform_event", hooks.gateway_platform_event)
     return hooks

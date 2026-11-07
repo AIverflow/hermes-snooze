@@ -8,7 +8,7 @@ A reminder for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that
 
 ## Status
 
-Work in progress. Working today: the `/snooze` command and all its subcommands, the `snooze_create` tool, the parser, the confirm matcher and the store. **Not wired yet:** sending the reminders on a timer, catching `ok` / `later` / `yes` replies from the chat, running the `then` action, and `/snooze test`. Until then, manage snoozes with the `/snooze ok|later|cancel|yes` subcommands.
+Work in progress. Working today: the `/snooze` command and all its subcommands, the `snooze_create` tool, the parser, the confirm matcher and the store. **Not wired yet:** sending the reminders on a timer, catching `ok` / `later` / `yes` replies from the chat and `/snooze test`. Until then, manage snoozes with the `/snooze ok|later|cancel|yes` subcommands.
 
 ## Install and first steps
 
@@ -50,7 +50,7 @@ From the CLI (no chat), reminders go to the first home channel set in your profi
 | `every <duration>` | Repeat interval. Default: 10 minutes. |
 | `until <time>` | Stop time: the first such time after the first reminder. Default: see [Configuration](#configuration). |
 | `ok <word>` | How you confirm. See [Confirming](#confirming). |
-| `then <action>` | A follow-up for the agent after you confirm. Takes everything after the first `then`. |
+| `then <action>` | A follow-up for the agent after you confirm. Takes everything after the first `then`. See [The then action](#the-then-action). |
 
 - **Times:** `8am`, `8:30am`, `4pm`, `16:00`. Read in your configured time zone, so daylight-saving days work.
 - **Durations:** `10m`, `1h`, `90s`, `1h30m` (units `s m h`, also `sec min hr`). Minimum 1 minute.
@@ -103,6 +103,24 @@ How replies are read:
 - **Which snooze.** A reply to a reminder message picks that snooze. Otherwise it is the running snooze that sent last.
 - **Slash commands are never answers.** A message starting with `/` goes to Hermes as usual, whatever the `ok` rule.
 - **`yes`** (the whole message) starts a snooze that is waiting for validation.
+
+### The then action
+
+When you confirm a snooze that has a `then`, the plugin first sends `✅ Done: <what>. Now: <action>…`, then the agent gets this message in the same chat: *The user confirmed the reminder '<what>'. Now do this: <action>. Then tell the user the result in one line.* The agent uses its own tools and answers in the chat.
+
+- **Text reply** (`ok`, your word, `ok, and book a table`): your own message becomes that agent turn, so it needs no setup. Extra text you wrote is added after it as "The user also wrote: ...".
+- **Reaction or `/snooze ok`** (no message to reuse): the plugin asks Hermes to start the turn. Hermes only allows that if you set `allow_gateway_injection` directly under the plugin entry (not under `settings`) in `~/.hermes/config.yaml`, then restart the gateway:
+
+  ```yaml
+  plugins:
+    entries:
+      snooze:
+        allow_gateway_injection: true
+  ```
+
+- **From the CLI or Desktop:** `/snooze ok` still confirms the snooze, but the reply says the then-action was not run. It runs only when you confirm from the chat.
+- **If it fails** (injection not allowed, no gateway, Hermes refuses), the chat gets `⚠️ then-action failed: <reason>`. The snooze stays `done`.
+- The agent's own rules apply: a risky tool asks for approval in the chat as usual.
 
 ## Agent tool
 

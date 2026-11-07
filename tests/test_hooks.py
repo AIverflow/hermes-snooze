@@ -8,7 +8,6 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 from snooze import hooks
 from snooze.confirm import CONFIRM, LATER, Decision
@@ -39,6 +38,21 @@ class FakeSender:
         return "1"
 
 
+class FakeInject:
+    """Stands in for `ctx.inject_message`: records the turns, answers `accept`, or raises `error`."""
+
+    def __init__(self, accept=True, error=None):
+        self.calls = []  # (prompt, origin)
+        self.accept = accept
+        self.error = error
+
+    def __call__(self, content, role="user", *, session_key=None, origin=None):
+        if self.error:
+            raise self.error
+        self.calls.append((content, origin))
+        return self.accept
+
+
 def gateway(authorized=False):
     return SimpleNamespace(_is_user_authorized_for_source=lambda source: authorized)
 
@@ -57,15 +71,15 @@ class Base(unittest.IsolatedAsyncioTestCase):
         self.auth_calls = 0
         self.authorized = False
         self.sender = FakeSender()
+        self.inject = FakeInject()
         self.hooks = Hooks(
+            inject=self.inject,
+            reply_grace=0,
             data_dir=lambda: self.dir,
             now=lambda: NOW,
             authorizes=self._authorizes,
             sender=self.sender,
         )
-        then = mock.patch.object(hooks, "run_then")
-        self.then = then.start()
-        self.addCleanup(then.stop)
 
     def _authorizes(self, gw, source):
         self.auth_calls += 1
@@ -97,6 +111,134 @@ class Base(unittest.IsolatedAsyncioTestCase):
         return [(chat, text) for _, chat, text in self.sender.sent]
 
 
+EMOJI = {"kind": "emoji", "value": "👍"}
+
+
+class ThenTest(Base):
+    PROMPT = (
+        "The user confirmed the reminder 'Wake up'. Now do this: start the coffee machine. "
+        "Then tell the user the result in one line."
+    )
+
+    def with_then(self, **kw):
+        return self.add(then="start the coffee machine", **kw)
+
+    async def react(self):
+        """Confirm with a reaction: the path that has no user message to rewrite, so it injects."""
+        payload = {"emojis": ["👍"], "chat_id": "123", "message_id": "777"}
+        self.hooks.gateway_platform_event(platform="telegram", event_type="reaction", payload=payload)
+        await asyncio.gather(*hooks._background_tasks)
+
+    async def test_text_confirm_says_done_then_rewrites_the_message_into_the_prompt(self):
+        s = self.with_then()
+        result = await self.dispatch(event("ok"))
+        self.assertEqual(result, {"action": "rewrite", "text": self.PROMPT})
+        self.assertEqual(self.stored(s).state, DONE)
+        self.assertEqual(self.sent(), [("123", "✅ Done: Wake up. Now: start the coffee machine…")])
+        self.assertEqual(self.inject.calls, [])  # no injection: needs no allow_gateway_injection
+
+    async def test_confirm_with_extra_text_rewrites_and_keeps_what_the_user_wrote(self):
+        self.with_then()
+        result = await self.dispatch(event("ok, and book a table"))
+        self.assertEqual(
+            result, {"action": "rewrite", "text": self.PROMPT + "\nThe user also wrote: ok, and book a table"}
+        )
+        self.assertEqual(self.inject.calls, [])
+
+    async def test_text_confirm_without_then_is_unchanged(self):
+        s = self.add()
+        self.assertEqual((await self.dispatch(event("ok")))["action"], "skip")
+        self.assertEqual(self.stored(s).state, DONE)
+        self.assertEqual(self.inject.calls, [])
+
+    async def test_extra_text_without_then_passes_through(self):
+        self.add()
+        self.assertIsNone(await self.dispatch(event("ok, and tell me a joke")))
+
+    async def test_command_origin_takes_the_chat_type_and_thread_of_the_confirming_message(self):
+        s = self.with_then(target=Target("telegram", "-100", "42"))
+        ev = event("ok", chat="-100", chat_type="group")
+        ev.source.thread_id = "9"
+        await self.hooks.run_then(self.stored(s), ev.source)
+        self.assertEqual(
+            self.inject.calls[0][1],
+            {"platform": "telegram", "chat_id": "-100", "chat_type": "group", "user_id": "42", "thread_id": "9"},
+        )
+        self.assertEqual(self.inject.calls[0][0], self.PROMPT)
+
+    async def test_done_is_sent_before_the_injection(self):
+        self.with_then(confirm=EMOJI)
+        order = []
+        self.sender.send = lambda target, text: order.append("send")
+        self.hooks._inject = lambda prompt, origin=None: order.append("inject") or True
+        await self.react()
+        self.assertEqual(order, ["send", "inject"])
+
+    async def test_refused_injection_tells_the_chat(self):
+        self.with_then(confirm=EMOJI)
+        self.inject.accept = False
+        await self.react()
+        texts = [text for _, text in self.sent()]
+        self.assertEqual(len(texts), 2)
+        self.assertTrue(texts[0].startswith("✅ Done"))
+        self.assertTrue(texts[1].startswith("⚠️ then-action failed: "))
+        self.assertIn("allow_gateway_injection", texts[1])
+
+    async def test_injection_error_tells_the_chat_the_reason(self):
+        s = self.with_then(confirm=EMOJI)
+        self.inject.error = RuntimeError("no gateway")
+        with self.assertLogs("snooze.hooks", "WARNING"):
+            await self.react()
+        self.assertEqual(self.sent()[1], ("123", "⚠️ then-action failed: RuntimeError: no gateway"))
+        self.assertEqual(self.stored(s).state, DONE)
+
+    async def test_no_inject_api_tells_the_chat(self):
+        self.with_then(confirm=EMOJI)
+        self.hooks._inject = None
+        await self.react()
+        self.assertEqual(self.sent()[1], ("123", "⚠️ then-action failed: this Hermes has no inject_message"))
+
+    async def test_failed_warning_send_is_only_logged(self):
+        self.with_then(confirm=EMOJI)
+        self.inject.accept = False
+        self.sender.fail = True
+        with self.assertLogs("snooze.hooks", "WARNING"):
+            await self.react()
+
+    async def test_later_and_yes_do_not_run_then(self):
+        self.with_then()
+        await self.dispatch(event("later 2"))
+        self.assertEqual(self.inject.calls, [])
+
+    async def test_reaction_confirm_sends_done_then_injects(self):
+        self.with_then(confirm=EMOJI)
+        await self.react()
+        self.assertEqual(self.sent(), [("123", "✅ Done: Wake up. Now: start the coffee machine…")])
+        self.assertEqual(self.inject.calls[0][0], self.PROMPT)
+        self.assertEqual(self.inject.calls[0][1]["chat_type"], "dm")
+
+    async def test_then_after_reply_runs_the_action_later_from_a_thread(self):
+        s = self.with_then()
+        done = threading.Event()
+        self.hooks._inject = lambda prompt, origin=None: done.set() or True
+        self.hooks.then_after_reply(self.stored(s), None)
+        self.assertTrue(await asyncio.to_thread(done.wait, 5))
+
+    async def test_warning_from_a_thread_is_a_plain_send(self):
+        s = self.with_then()
+        self.inject.accept = False
+        await asyncio.to_thread(self.hooks._then_in_thread, self.stored(s), None)
+        self.assertTrue(self.sent()[0][1].startswith("⚠️ then-action failed"))
+        self.assertIsNot(self.sender.threads[0], threading.main_thread())
+
+    async def test_default_inject_is_the_ctx_method(self):
+        calls = []
+        ctx = SimpleNamespace(inject_message=lambda *a, **k: calls.append((a, k)) or True)
+        await Hooks(ctx, sender=self.sender).run_then(self.with_then())
+        self.assertEqual(len(calls), 1)
+        self.assertIn("origin", calls[0][1])
+
+
 class DispatchTest(Base):
     async def test_pure_confirm_is_skipped_and_done(self):
         s = self.add()
@@ -104,8 +246,7 @@ class DispatchTest(Base):
         self.assertEqual(result["action"], "skip")
         self.assertEqual(self.stored(s).state, DONE)
         self.assertEqual(self.sent(), [("123", "✅ Done: Wake up")])
-        self.then.assert_called_once()
-        self.assertEqual(self.then.call_args.args[0].id, s.id)
+        self.assertEqual(self.inject.calls, [])  # no `then`: nothing for the agent
 
     async def test_confirm_with_more_text_passes_through(self):
         s = self.add()
@@ -121,7 +262,7 @@ class DispatchTest(Base):
         self.assertEqual(self.stored(s).state, ACTIVE)
         self.assertEqual(self.stored(s).next_at, (NOW + timedelta(minutes=2)).isoformat())
         self.assertTrue(self.sent()[0][1].startswith("⏰ OK, back at"))
-        self.then.assert_not_called()
+        self.assertEqual(self.inject.calls, [])
 
     async def test_yes_starts_a_pending_snooze(self):
         s = self.add(state=PENDING)
@@ -129,7 +270,7 @@ class DispatchTest(Base):
         self.assertEqual(result["action"], "skip")
         self.assertEqual(self.stored(s).state, ACTIVE)
         self.assertTrue(self.sent()[0][1].startswith("▶️ Started"))
-        self.then.assert_not_called()
+        self.assertEqual(self.inject.calls, [])
 
     async def test_expired_yes_is_not_started(self):
         s = self.add(state=PENDING, created=(NOW - timedelta(hours=1)).isoformat())
@@ -281,7 +422,6 @@ class ReactionTest(Base):
         await self.react()
         self.assertEqual(self.stored(s).state, DONE)
         self.assertEqual(self.sent(), [("123", "✅ Done: Wake up")])
-        self.then.assert_called_once()
 
     async def test_reaction_with_the_default_ok_rule_does_not_confirm(self):
         s = self.add()
