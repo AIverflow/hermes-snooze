@@ -1,0 +1,22 @@
+name: snooze
+version: "0.1.0"
+description: "A reminder that repeats on your phone until you confirm it, then can hand a follow-up to the agent. Zero LLM calls per reminder."
+author: the023
+requires_hermes: ">=0.22.7"
+config_schema:
+  validate_setup:
+    type: bool
+    default: true
+    description: "Require a reply of 'yes' before a new snooze starts."
+  cap_minutes:
+    type: int
+    default: 120
+    description: "Maximum minutes a snooze may keep repeating."
+  cap_reminders:
+    type: int
+    default: 10
+    description: "Maximum number of reminders sent per snooze."
+  timezone:
+    type: str
+    default: system
+    description: "IANA timezone name (for example Europe/Paris), or 'system' to use the machine's timezone."
