@@ -237,6 +237,62 @@ class DurationTest(unittest.TestCase):
         self.assertIsNone(s.every)
 
 
+class SpacedDurationTest(unittest.TestCase):
+    """A duration written as a number word then a unit word: `2 min`."""
+
+    def test_live_sentence(self):
+        s = parse("make a break at 8pm every 2 min until 10pm then turn all light on")
+        self.assertIsInstance(s, p.Spec, s)
+        self.assertEqual(s.text, "make a break")
+        self.assertEqual(s.first_at, paris(20))
+        self.assertEqual(s.every, timedelta(minutes=2))
+        self.assertEqual(s.until, paris(22))
+        self.assertEqual(s.then, "turn all light on")
+
+    def test_in(self):
+        s = parse("X in 5 min")
+        self.assertEqual(s.text, "X")
+        self.assertEqual(s.first_at, NOW.astimezone(UTC) + timedelta(minutes=5))
+
+    def test_units(self):
+        for d, expected in (("1 h", 60), ("30 sec", 0.5), ("2 MIN", 2), ("1 hr", 60)):
+            with self.subTest(d=d):
+                s = parse(f"X at 4pm every {d}")
+                if expected < 1:
+                    self.assertIsInstance(s, p.ParseError)
+                else:
+                    self.assertEqual(s.every, timedelta(minutes=expected))
+
+    def test_below_one_minute_is_error(self):
+        e = parse("X at 4pm every 30 sec")
+        self.assertIsInstance(e, p.ParseError)
+        self.assertIn("1 minute", e.message)
+
+    def test_compact_forms_still_work(self):
+        self.assertEqual(parse("X at 4pm every 2min").every, timedelta(minutes=2))
+        self.assertEqual(parse("X at 4pm every 1h30m").every, timedelta(minutes=90))
+
+    def test_short_form(self):
+        s = parse("Wake up 8am 10 min")
+        self.assertEqual(s.text, "Wake up")
+        self.assertEqual(s.every, timedelta(minutes=10))
+
+    def test_number_without_unit_stays_in_text(self):
+        s = parse("Take 2 pills at 8am")
+        self.assertEqual(s.text, "Take 2 pills")
+        self.assertIsNone(s.every)
+
+    def test_number_unit_in_text_is_kept_as_written(self):
+        s = parse("Run 5   min at 8am")
+        self.assertEqual(s.text, "Run 5   min")
+        self.assertIsNone(s.every)
+
+    def test_hours_and_minutes_words(self):
+        s = parse("X at 4pm every 1 h 30 min")
+        self.assertEqual(s.text, "X")
+        self.assertEqual(s.every, timedelta(minutes=90))
+
+
 class DstTest(unittest.TestCase):
     """America/New_York: clocks jump 02:00 -> 03:00 on 2026-03-08 and 02:00 -> 01:00 on 2026-11-01."""
 

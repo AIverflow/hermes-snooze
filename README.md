@@ -58,7 +58,7 @@ A snooze made from the CLI (no chat) goes to the first home channel set in your 
 | `then <action>` | A follow-up for the agent after you confirm. Takes everything after the first `then`. See [The then action](#the-then-action). |
 
 - **Times:** `8am`, `8:30am`, `4pm`, `16:00`. Read in your configured time zone, so daylight-saving days work.
-- **Durations:** `10m`, `1h`, `90s`, `1h30m` (units `s m h`, also `sec min hr`). Minimum 1 minute.
+- **Durations:** `10m`, `1h`, `90s`, `1h30m`, or with spaces: `10 min`, `1 h 30 min` (units `s m h`, also `sec min hr`). Minimum 1 minute.
 - **Any order:** the clauses can come in any order after the text. They are read from the end and stop at the first thing that is not a clause, so `Call mom before 6pm at 4pm` has the text "Call mom before 6pm".
 - **Short form:** `/snooze Wake up 8am 10m` means `at 8am every 10m`. A lone trailing time (`/snooze Wake up 8am`) means `at 8am`. A time right after `before`, `by`, `after`, `around`, `since`, `from` or `to` is part of the text.
 - **Keywords** (`at in every until ok then`) are case-insensitive.

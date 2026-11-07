@@ -17,8 +17,9 @@ _KEYWORDS = frozenset({"at", "in", "every", "until", "ok", "then"})
 _PREPOSITIONS = frozenset({"before", "by", "after", "around", "since", "from", "to"})
 
 _TIME_RE = re.compile(r"^(\d{1,2})(?::(\d{2}))?(am|pm)?$")
-_DURATION_RE = re.compile(r"^(?:\d+(?:sec|min|hr|s|m|h))+$")
-_DURATION_PART_RE = re.compile(r"(\d+)(sec|min|hr|s|m|h)")
+# `\s*` lets a duration be one word ("2m") or words joined by `_join_number_units` ("1 h 30 min").
+_DURATION_RE = re.compile(r"^(?:\d+\s*(?:sec|min|hr|s|m|h)\s*)+$")
+_DURATION_PART_RE = re.compile(r"(\d+)\s*(sec|min|hr|s|m|h)")
 _UNIT_SECONDS = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hr": 3600}
 
 EXAMPLE_FULL = "/snooze Send email to John Doe at 4pm every 10m until 6pm then close ticket 42"
@@ -79,6 +80,29 @@ def parse_duration(word: str) -> timedelta | None:
         return None
     seconds = sum(int(n) * _UNIT_SECONDS[u] for n, u in _DURATION_PART_RE.findall(word))
     return timedelta(seconds=seconds)
+
+
+def _join_number_units(toks: list[tuple[str, int, int]], text: str) -> list[tuple[str, int, int]]:
+    """Merge number and unit words (``2``, ``min``) into one token, so ``2 min`` reads like ``2min``.
+
+    Consecutive pairs merge too (``1 h 30 min``). The merged token keeps the original text between the
+    words, so the reminder text can still be cut from ``text`` by position. A number not followed by a
+    unit word is left alone.
+    """
+    out: list[tuple[str, int, int]] = []
+    last_was_pair = False
+    i = 0
+    while i < len(toks):
+        if i + 1 < len(toks) and toks[i][0].isdecimal() and toks[i + 1][0].casefold() in _UNIT_SECONDS:
+            start = out.pop()[1] if last_was_pair else toks[i][1]
+            out.append((text[start : toks[i + 1][2]], start, toks[i + 1][2]))
+            last_was_pair = True
+            i += 2
+        else:
+            out.append(toks[i])
+            last_was_pair = False
+            i += 1
+    return out
 
 
 def _next_occurrence(t: time, after: datetime, zone: _tzinfo) -> datetime:
@@ -238,6 +262,7 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
             toks = toks[:k]
             break
 
+    toks = _join_number_units(toks, text)
     words = [t[0] for t in toks]
     low = [w.casefold() for w in words]
 
