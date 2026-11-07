@@ -270,28 +270,24 @@ def _parse_id(token: str) -> int | None:
     return int(token) if token.isdigit() else None
 
 
-def _single_token_duration(text: str, now: datetime) -> timedelta | None:
-    """A duration such as "30m" or "1h30m" read by the parser's own rules (minimum 1 minute), else None."""
-    if len(text.split()) != 1:
-        return None
-    spec = _parse.parse(f"x in {text}", now, "UTC")
-    if isinstance(spec, Spec) and spec.text == "x" and spec.every is None and spec.until is None:
-        return spec.first_at - now.astimezone(timezone.utc)
-    return None
+def _duration(text: str) -> timedelta | None:
+    """A duration such as "30m" or "1h30m" of at least one minute, else None."""
+    delta = _parse.parse_duration(text.strip())
+    return delta if delta and delta >= _parse.MIN_DURATION else None
 
 
-def _minutes_arg(token: str, now: datetime) -> float | None:
+def _minutes_arg(token: str) -> float | None:
     """`later` delay: a bare number is minutes, or a duration such as 30m / 1h. None if invalid or under a minute."""
     if token.isdigit():
         return int(token) if int(token) >= 1 else None
-    delta = _single_token_duration(token, now)
+    delta = _duration(token)
     return _minutes_value(delta) if delta else None
 
 
 _BAD_CONFIRM = "confirm must be one word, an emoji, `any` or `contains:<word>`."
 
 
-def _confirm_rule(value: Any, now: datetime) -> ConfirmRule | str:
+def _confirm_rule(value: Any) -> ConfirmRule | str:
     """A ConfirmRule from the tool's `confirm` value, or an error message."""
     if isinstance(value, dict):
         kind, text = str(value.get("kind") or "ok").lower(), str(value.get("value") or "")
@@ -305,10 +301,8 @@ def _confirm_rule(value: Any, now: datetime) -> ConfirmRule | str:
         return ConfirmRule()
     if len(text.split()) != 1:
         return _BAD_CONFIRM
-    spec = _parse.parse(f"x in 1m ok {text}", now, "UTC")
-    if isinstance(spec, Spec) and spec.text == "x":
-        return spec.confirm
-    return _BAD_CONFIRM
+    rule = _parse.parse_ok_arg(text)
+    return _BAD_CONFIRM if isinstance(rule, ParseError) else rule
 
 
 # -- Hermes access (imports only inside the helpers) ---------------------------
@@ -559,13 +553,13 @@ class Commands:
 
         every = None
         if args.get("every") not in (None, ""):
-            every = self._tool_every(args["every"], now)
+            every = self._tool_every(args["every"])
             if every is None:
                 return {
                     "error": "every must be a number of minutes or a duration such as 10m or 1h30m (minimum 1 minute)."
                 }
 
-        rule = _confirm_rule(args.get("confirm"), now)
+        rule = _confirm_rule(args.get("confirm"))
         if isinstance(rule, str):
             return {"error": rule}
 
@@ -610,7 +604,7 @@ class Commands:
         return moment.astimezone(timezone.utc)
 
     @staticmethod
-    def _tool_every(value: Any, now: datetime) -> timedelta | None:
+    def _tool_every(value: Any) -> timedelta | None:
         if isinstance(value, bool):
             return None
         if isinstance(value, (int, float)):
@@ -619,7 +613,7 @@ class Commands:
         text = str(value).strip()
         if text.isdigit():
             text += "m"
-        return _single_token_duration(text, now)
+        return _duration(text)
 
     # -- subcommands -----------------------------------------------------------
     # Each returns the reply, or None when the arguments do not fit its shape.
@@ -675,7 +669,7 @@ class Commands:
         now = self._now()
         minutes = None
         if rest:
-            minutes = _minutes_arg(rest[0], now)
+            minutes = _minutes_arg(rest[0])
             if minutes is None:
                 return None
         sid = None

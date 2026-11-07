@@ -72,7 +72,8 @@ def _parse_time(word: str) -> time | None:
     return time(hour, minute)
 
 
-def _parse_duration(word: str) -> timedelta | None:
+def parse_duration(word: str) -> timedelta | None:
+    """``10m``, ``1h30m``, ``90s`` as a timedelta; None if ``word`` is not a duration."""
     word = word.casefold()
     if not _DURATION_RE.match(word):
         return None
@@ -95,7 +96,8 @@ def _is_emoji(word: str) -> bool:
     return any(ord(c) > 127 for c in word) and not any(c.isalnum() for c in word)
 
 
-def _parse_ok_arg(arg: str) -> ConfirmRule | ParseError:
+def parse_ok_arg(arg: str) -> ConfirmRule | ParseError:
+    """The rule for the word after ``ok``: ``any``, ``contains:<word>``, an emoji or a word."""
     low = arg.casefold()
     if low == "any":
         return ConfirmRule("any")
@@ -174,7 +176,7 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
                     break
                 until_t = t
         elif kw in ("in", "every"):
-            d = _parse_duration(arg)
+            d = parse_duration(arg)
             if d is None:
                 break
             if kw == "in":
@@ -191,7 +193,7 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
         elif kw == "ok":
             if confirm is not None or low[end - 1] in _KEYWORDS:
                 break
-            rule = _parse_ok_arg(arg)
+            rule = parse_ok_arg(arg)
             if isinstance(rule, ParseError):
                 return rule
             confirm = rule
@@ -209,10 +211,10 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
                 return None
             return _parse_time(words[i - 1])
 
-        if every is None and end >= 2 and _parse_duration(words[end - 1]) is not None:
+        if every is None and end >= 2 and parse_duration(words[end - 1]) is not None:
             t = bare_time_at(end - 1)
             if t is not None:
-                d = _parse_duration(words[end - 1])
+                d = parse_duration(words[end - 1])
                 if d < MIN_DURATION:
                     return ParseError(f"`{words[end - 1]}` is too short: the minimum is 1 minute.", EXAMPLE_SHORT)
                 at_t, every, end = t, d, end - 2
