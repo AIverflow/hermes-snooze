@@ -51,6 +51,7 @@ class Base(unittest.TestCase):
         self.now = NOW
         self.home = HOME
         self.env = {}
+        self.paused = False
         self.ctx = FakeCtx(**self.config)
         self.cmds = Commands(
             self.ctx,
@@ -58,6 +59,7 @@ class Base(unittest.TestCase):
             now=lambda: self.now,
             home_target=lambda: self.home,
             session_env=lambda name: self.env.get(name, ""),
+            is_paused=lambda: self.paused,
         )
         self.store = Store(self.dir)
 
@@ -289,7 +291,7 @@ class ListTest(Base):
         self.add(state=CANCELLED, text="Cancelled one")
         reply = self.run_cmd("list")
         self.assertIn("#1 Active one — next today 11:05, 2 sent", reply)
-        self.assertIn("#2 Waiting one — waiting for yes, until today 11:10", reply)
+        self.assertIn("#2 Waiting one — waiting for yes (answer by today 11:10)", reply)
         self.assertNotIn("Done one", reply)
         self.assertNotIn("Cancelled one", reply)
 
@@ -300,6 +302,19 @@ class ListTest(Base):
     def test_last_error_is_shown(self):
         self.add(last_error="chat not found", next_at=NOW.isoformat())
         self.assertIn("last error: chat not found", self.run_cmd("list"))
+
+    def test_paused_is_the_first_line(self):
+        self.paused = True
+        self.add(next_at=(NOW + timedelta(minutes=5)).isoformat())
+        self.assertEqual(self.run_cmd("list").splitlines()[0], commands.PAUSED_TEXT)
+
+    def test_paused_with_nothing_running(self):
+        self.paused = True
+        self.assertEqual(self.run_cmd("list"), f"{commands.PAUSED_TEXT}\nNo snoozes running.")
+
+    def test_not_paused_has_no_paused_line(self):
+        self.add(next_at=(NOW + timedelta(minutes=5)).isoformat())
+        self.assertNotIn("paused", self.run_cmd("list"))
 
 
 class OkTest(Base):
@@ -357,8 +372,9 @@ class LaterTest(Base):
         self.add()
         self.run_cmd("later 1h")
         self.assertEqual(self.store.load()[0].next_at, "2026-11-07T11:00:00+00:00")
+        # nothing sent yet: the second `later` pushes from the 11:00 it already has
         self.run_cmd("later 15m")
-        self.assertEqual(self.store.load()[0].next_at, "2026-11-07T10:15:00+00:00")
+        self.assertEqual(self.store.load()[0].next_at, "2026-11-07T11:15:00+00:00")
 
     def test_later_without_number_uses_the_interval(self):
         self.add(schedule=Schedule(first_at=NOW.isoformat(), every=7, tz="Europe/Paris"))
@@ -372,6 +388,20 @@ class LaterTest(Base):
         saved = self.store.load()[0]
         self.assertEqual(saved.next_at, "2026-11-07T10:30:00+00:00")
         self.assertEqual(saved.schedule.until, "2026-11-07T10:37:00+00:00")
+
+    def test_later_after_a_reminder_counts_from_now(self):
+        # reminder sent at 10:00, next at 10:10; `later 5` at 10:01 -> 10:06, not 10:15
+        self.now = NOW + timedelta(minutes=1)
+        self.add(sent_count=1, next_at=(NOW + timedelta(minutes=10)).isoformat())
+        self.assertIn("back at 11:06", self.run_cmd("later 5"))
+        self.assertEqual(self.store.load()[0].next_at, "2026-11-07T10:06:00+00:00")
+
+    def test_later_before_first_reminder_moves_it_later(self):
+        # first reminder at 11:26 local (10:26 UTC); `later 10` said at 09:56 UTC -> 10:36 UTC, not 10:06
+        self.now = NOW - timedelta(minutes=4)
+        self.add(next_at=(NOW + timedelta(minutes=26)).isoformat())
+        self.assertIn("back at 11:36", self.run_cmd("later 10"))
+        self.assertEqual(self.store.load()[0].next_at, "2026-11-07T10:36:00+00:00")
 
     def test_later_keeps_the_snooze_active(self):
         self.add()
@@ -596,6 +626,36 @@ class ToolTest(Base):
 
     def test_non_dict_args(self):
         self.assertIn("error", json.loads(self.cmds.tool(None)))
+
+
+class MediaTagTest(Base):
+    """A Hermes `MEDIA:` tag is neutralized in the text and in `then`, on both paths."""
+
+    def test_command_text_and_then(self):
+        self.create("Photo MEDIA:/tmp/a.png at 4pm then send MEDIA:/tmp/b.png")
+        s = self.store.load()[0]
+        self.assertEqual(s.text, "Photo MEDIA :/tmp/a.png")
+        self.assertEqual(s.then, "send MEDIA :/tmp/b.png")
+
+    def test_tool_text_and_then(self):
+        self.env = {"HERMES_SESSION_PLATFORM": "telegram", "HERMES_SESSION_CHAT_ID": "123"}
+        result = json.loads(
+            self.cmds.tool(
+                {
+                    "text": "Photo MEDIA:/tmp/a.png",
+                    "first_at": "2026-11-07T16:00",
+                    "then": "send MEDIA:/tmp/b.png",
+                }
+            )
+        )
+        self.assertTrue(result["ok"])
+        self.assertNotIn("MEDIA:", result["message"])
+        s = self.store.load()[0]
+        self.assertEqual((s.text, s.then), ("Photo MEDIA :/tmp/a.png", "send MEDIA :/tmp/b.png"))
+
+    def test_text_without_tag_is_unchanged(self):
+        self.create("Wake up at 4pm")
+        self.assertEqual(self.store.load()[0].text, "Wake up")
 
 
 class SettingsTest(unittest.TestCase):

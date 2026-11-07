@@ -79,12 +79,19 @@ def after_send(snooze: Snooze, sent_at: datetime) -> None:
 
 
 def apply_later(snooze: Snooze, now: datetime, minutes: float) -> datetime:
-    """Push the next reminder to `now + minutes`; return it.
+    """Push the next reminder back by `minutes`; return the new time.
+
+    Counted from now, except before the first reminder (nothing sent yet): then from the
+    first reminder's time, so `later` never moves it earlier.
 
     A time past `until` moves `until` to one `every` after it: `due` misses at `until`, so the
     extra reminder is sent and the user still has one interval to answer it.
     """
-    at = now + timedelta(minutes=minutes)
+    current = echo.from_iso(snooze.next_at)
+    base = now
+    if snooze.sent_count == 0 and current is not None and current > now:
+        base = current
+    at = base + timedelta(minutes=minutes)
     snooze.next_at = _iso(at)
     until = echo.from_iso(snooze.schedule.until)
     if until is not None and at > until:

@@ -75,7 +75,7 @@ Examples:
 | `/snooze <what> ...` | Create a snooze (see above). |
 | `/snooze list` | Snoozes that are running or waiting for `yes`. |
 | `/snooze ok [id]` | Confirm from this client. Without an id: the running snooze that sent last. |
-| `/snooze later [N] [id]` | Push back by `N` minutes (`30`, `30m`, `1h`). Default: the snooze interval. |
+| `/snooze later [N] [id]` | Push back by `N` minutes (`30`, `30m`, `1h`) from now. Before the first reminder, push from that reminder's time instead. Default: the snooze interval. |
 | `/snooze cancel <id>` | Stop without confirming. |
 | `/snooze yes [id]` | Start a snooze that is waiting for validation. Without an id: the newest waiting one. |
 | `/snooze test` | Not available yet. |

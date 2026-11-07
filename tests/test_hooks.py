@@ -79,6 +79,7 @@ class Base(unittest.IsolatedAsyncioTestCase):
             schedule=Schedule(first_at=(NOW + timedelta(minutes=5)).isoformat(), every=10, tz="UTC"),
             state=state,
             last_sent_at=NOW.isoformat() if state == ACTIVE else None,
+            sent_count=1 if state == ACTIVE else 0,
             last_message_id="777" if state == ACTIVE else None,
             next_at=(NOW + timedelta(minutes=10)).isoformat() if state == ACTIVE else None,
             confirm={"kind": "ok", "value": ""},

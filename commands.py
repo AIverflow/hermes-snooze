@@ -78,6 +78,8 @@ HELP = (
     "Other commands: list, ok [id], later [minutes] [id], cancel <id>, yes [id], test"
 )
 
+PAUSED_TEXT = "⏸ Hermes is paused: no reminders until hermes resume"
+
 NO_TARGET_TEXT = (
     "No chat to send reminders to: run this from a chat (Telegram, Discord, ...), "
     "or set a home channel for the profile. Nothing was set."
@@ -175,6 +177,11 @@ def start_snooze(snooze: Snooze, now: datetime) -> str:
 # -- small helpers -------------------------------------------------------------
 
 
+def _no_media_tag(text: str | None) -> str | None:
+    """Hermes sends a `MEDIA:` tag in a reply as a local file: write it as `MEDIA :` so a snooze never carries one."""
+    return text.replace("MEDIA:", "MEDIA :") if text else text
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -243,6 +250,12 @@ def hermes_session_env(name: str) -> str:
         return os.environ.get(name, "")
 
 
+def hermes_paused() -> bool:
+    from .send import hermes_is_paused  # send imports this module: lazy, not at the top
+
+    return hermes_is_paused()
+
+
 def hermes_home_target() -> Target | None:
     """The first home channel set in the profile, or None."""
     try:
@@ -294,12 +307,14 @@ class Commands:
         now: Callable[[], datetime] = _utcnow,
         home_target: Callable[[], Target | None] = hermes_home_target,
         session_env: Callable[[str], str] = hermes_session_env,
+        is_paused: Callable[[], bool] = hermes_paused,
     ):
         self._ctx = ctx
         self._data_dir = data_dir
         self._now = now
         self._home_target = home_target
         self._session_env = session_env
+        self._is_paused = is_paused
 
     # -- entry points --------------------------------------------------------
 
@@ -373,7 +388,7 @@ class Commands:
         until = spec.until or spec.first_at + timedelta(minutes=settings.cap_minutes)
         active = not settings.validate_setup
         record = Snooze(
-            text=spec.text,
+            text=_no_media_tag(spec.text),
             created=_iso(now),
             target=target,
             schedule=Schedule(
@@ -383,7 +398,7 @@ class Commands:
                 tz=spec.tz,
             ),
             confirm={"kind": spec.confirm.kind, "value": spec.confirm.value},
-            then=spec.then,
+            then=_no_media_tag(spec.then),
             state=ACTIVE if active else PENDING,
             next_at=_iso(spec.first_at) if active else None,
         )
@@ -490,10 +505,11 @@ class Commands:
         if rest:
             return None
         now = self._now()
+        head = [PAUSED_TEXT] if self._is_paused() else []
         shown = [s for s in self._store().load() if s.state in (ACTIVE, PENDING)]
         if not shown:
-            return "No snoozes running."
-        lines = ["⏰ Snoozes"]
+            return "\n".join(head + ["No snoozes running."])
+        lines = head + ["⏰ Snoozes"]
         for s in shown:
             zone = s.schedule.tz
             if s.state == PENDING:
@@ -501,8 +517,8 @@ class Commands:
                 if is_pending_expired(s, now):
                     detail = "waiting for yes, expired (not started)"
                 else:
-                    until = f", until {echo.format_when(deadline, zone, now)}" if deadline else ""
-                    detail = f"waiting for yes{until}"
+                    answer_by = f" (answer by {echo.format_when(deadline, zone, now)})" if deadline else ""
+                    detail = f"waiting for yes{answer_by}"
             else:
                 nxt = echo.from_iso(s.next_at)
                 detail = f"next {echo.format_when(nxt, zone, now)}" if nxt else "no next reminder"

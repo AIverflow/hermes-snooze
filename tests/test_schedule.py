@@ -140,6 +140,29 @@ class ApplyLaterTest(unittest.TestCase):
         schedule.apply_later(s, NOW, 30)
         self.assertIsNone(s.schedule.until)
 
+    def test_before_first_reminder_pushes_from_that_reminder(self):
+        # first reminder at 10:26 (next_at, nothing sent), `later 10` at 09:56 -> 10:36, not 10:06
+        s = make(next_at=NOW + timedelta(minutes=26))
+        at = schedule.apply_later(s, NOW - timedelta(minutes=4), 10)
+        self.assertEqual(at, NOW + timedelta(minutes=36))
+        self.assertEqual(s.next_at, at.isoformat())
+
+    def test_after_a_reminder_pushes_from_now(self):
+        # reminder sent at 10:00, next at 10:10; `later 5` at 10:01 -> 10:06, not 10:15
+        s = make(next_at=NOW + timedelta(minutes=10), sent_count=1)
+        at = schedule.apply_later(s, NOW + timedelta(minutes=1), 5)
+        self.assertEqual(at, NOW + timedelta(minutes=6))
+        self.assertEqual(s.next_at, at.isoformat())
+
+    def test_overdue_reminder_pushes_from_now(self):
+        s = make(next_at=NOW - timedelta(minutes=3))
+        at = schedule.apply_later(s, NOW, 10)
+        self.assertEqual(at, NOW + timedelta(minutes=10))
+
+    def test_no_next_at_pushes_from_now(self):
+        s = make(next_at=None)
+        self.assertEqual(schedule.apply_later(s, NOW, 10), NOW + timedelta(minutes=10))
+
 
 class PendingExpiryTest(unittest.TestCase):
     def snooze(self, state=PENDING, created=NOW):
