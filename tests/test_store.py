@@ -29,14 +29,14 @@ def _add_many(data_dir, tag, count):
 
 
 def _hold_sender(data_dir, ready, release):
-    with store.sender_lock(data_dir) as held:
+    with store.SenderLock(data_dir) as held:
         ready.put(held)
         if held:
             release.get(timeout=20)
 
 
 def _try_sender(data_dir, out):
-    with store.sender_lock(data_dir) as held:
+    with store.SenderLock(data_dir) as held:
         out.put(held)
 
 
@@ -91,11 +91,6 @@ class RoundTripTest(TmpCase):
                 txn.get(sn.id).state = store.CANCELLED
                 raise RuntimeError("nope")
         self.assertEqual(self.store.get(sn.id).state, store.PENDING)
-
-    def test_save_replaces_all(self):
-        self.store.add(make("a"))
-        self.store.save([])
-        self.assertEqual(self.store.load(), [])
 
     def test_unknown_keys_ignored(self):
         self.store.add(make())
@@ -182,26 +177,26 @@ class SenderLockTest(TmpCase):
             other.start()
             other.join(20)
             self.assertFalse(out.get(timeout=5))
-            lock = self.store.sender_lock()
+            lock = store.SenderLock(self.dir)
             self.assertFalse(lock.acquire())
         finally:
             release.put(True)
             holder.join(20)
         # Holder gone: the lock is free again.
-        lock = self.store.sender_lock()
+        lock = store.SenderLock(self.dir)
         self.assertTrue(lock.acquire())
         lock.release()
 
     def test_released_after_with(self):
-        with store.sender_lock(self.dir) as held:
+        with store.SenderLock(self.dir) as held:
             self.assertTrue(held)
-            with store.sender_lock(self.dir) as second:
+            with store.SenderLock(self.dir) as second:
                 self.assertFalse(second)
-        with store.sender_lock(self.dir) as again:
+        with store.SenderLock(self.dir) as again:
             self.assertTrue(again)
 
     def test_sender_lock_does_not_block_store(self):
-        with store.sender_lock(self.dir):
+        with store.SenderLock(self.dir):
             self.store.add(make())
         self.assertEqual(len(self.store.load()), 1)
 

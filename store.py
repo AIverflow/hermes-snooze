@@ -172,7 +172,7 @@ class Store:
     @contextlib.contextmanager
     def transaction(self) -> Iterator[Txn]:
         """Read-modify-write under the exclusive lock. Saves on clean exit, discards on exception."""
-        with _flock(self.lock_path, blocking=True, timeout=self.lock_timeout) as held:
+        with _flock(self.lock_path, self.lock_timeout) as held:
             if not held:
                 raise StoreError(f"timed out after {self.lock_timeout}s waiting for lock {self.lock_path}")
             snoozes, next_id = self._read()
@@ -189,14 +189,6 @@ class Store:
         """Store a new record and return it with its assigned id."""
         with self.transaction() as txn:
             return txn.add(snooze)
-
-    def save(self, snoozes: list[Snooze]) -> None:
-        """Replace all records. Prefer `transaction()` for read-modify-write."""
-        with self.transaction() as txn:
-            txn.snoozes = list(snoozes)
-
-    def sender_lock(self) -> SenderLock:
-        return sender_lock(self.data_dir)
 
     # -- file access -------------------------------------------------------
 
@@ -250,28 +242,35 @@ class Store:
 # -- locks -----------------------------------------------------------------
 
 
-@contextlib.contextmanager
-def _flock(path: Path, blocking: bool, timeout: float = 0.0) -> Iterator[bool]:
-    """Hold an exclusive flock on `path`. Yields True if taken, False if not (only when not blocking forever)."""
+def _open_lock(path: Path) -> int:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        return os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as exc:
         raise StoreError(f"cannot open lock file {path}: {exc}") from exc
-    held = False
+
+
+def _try_lock(fd: int, path: Path) -> bool:
+    """Take the exclusive lock without waiting. False if another process holds it."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    except OSError as exc:
+        raise StoreError(f"cannot lock {path}: {exc}") from exc
+    return True
+
+
+@contextlib.contextmanager
+def _flock(path: Path, timeout: float) -> Iterator[bool]:
+    """Hold the exclusive lock on `path`, waiting up to `timeout` seconds. Yields whether it was taken."""
+    fd = _open_lock(path)
     try:
         deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                held = True
-                break
-            except BlockingIOError:
-                if not blocking or time.monotonic() >= deadline:
-                    break
-                time.sleep(0.01)
-            except OSError as exc:
-                raise StoreError(f"cannot lock {path}: {exc}") from exc
+        held = _try_lock(fd, path)
+        while not held and time.monotonic() < deadline:
+            time.sleep(0.01)
+            held = _try_lock(fd, path)
         yield held
     finally:
         # Closing the descriptor drops the lock (also if the process dies).
@@ -279,40 +278,31 @@ def _flock(path: Path, blocking: bool, timeout: float = 0.0) -> Iterator[bool]:
 
 
 class SenderLock:
-    """Non-blocking lock for the single process that sends reminders.
+    """Lock for the single process that sends reminders. The OS frees it if the process dies.
 
-    Use as `with sender_lock(dir) as held:` (held is a bool), or call
-    `acquire()` / `release()` to keep it for the life of a timer loop.
-    The OS frees it if the process dies.
+    `with SenderLock(data_dir) as held:` gives a bool, or call `acquire()` /
+    `release()` to keep it for the life of a timer loop.
     """
 
-    def __init__(self, path: Path):
-        self.path = Path(path)
+    def __init__(self, data_dir: str | os.PathLike):
+        self.path = Path(data_dir) / SENDER_LOCK_NAME
         self._fd: int | None = None
-
-    @property
-    def held(self) -> bool:
-        return self._fd is not None
 
     def acquire(self) -> bool:
         """Try to take the lock without waiting. True if this object now holds it."""
         if self._fd is not None:
             return True
+        fd = _open_lock(self.path)
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-        except OSError as exc:
-            raise StoreError(f"cannot open lock file {self.path}: {exc}") from exc
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            held = _try_lock(fd, self.path)
+        except StoreError:
             os.close(fd)
-            return False
-        except OSError as exc:
+            raise
+        if held:
+            self._fd = fd
+        else:
             os.close(fd)
-            raise StoreError(f"cannot lock {self.path}: {exc}") from exc
-        self._fd = fd
-        return True
+        return held
 
     def release(self) -> None:
         if self._fd is not None:
@@ -324,8 +314,3 @@ class SenderLock:
 
     def __exit__(self, *exc: object) -> None:
         self.release()
-
-
-def sender_lock(data_dir: str | os.PathLike) -> SenderLock:
-    """Lock object for `<data_dir>/sender.lock`; only one process can hold it at a time."""
-    return SenderLock(Path(data_dir) / SENDER_LOCK_NAME)
