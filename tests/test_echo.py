@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from snooze import echo
-from snooze.store import Schedule, Snooze, Target
+from snooze.store import ACTIVE, PENDING, Schedule, Snooze, Target
 
 NOW = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)  # 11:00 in Paris
 
@@ -79,6 +79,38 @@ class GatewayWarningTest(unittest.TestCase):
 
     def test_no_warning_by_default(self):
         self.assertNotIn("gateway", self.render())
+
+
+class StartStateTest(unittest.TestCase):
+    def render(self, state, **kw):
+        sn = Snooze(
+            id=3,
+            text="Stretch",
+            created=NOW.isoformat(),
+            target=Target("telegram", "1", "1"),
+            schedule=Schedule(first_at=(NOW + timedelta(hours=1)).isoformat(), every=10, tz="Europe/Paris"),
+            confirm={"kind": "ok", "value": ""},
+            state=state,
+        )
+        return echo.render_echo(sn, NOW, "this chat", False, 10, timedelta(minutes=10), **kw)
+
+    def test_started_has_no_yes_line_and_undo_is_last(self):
+        lines = self.render(ACTIVE).splitlines()
+        self.assertFalse(any("yes" in line for line in lines))
+        self.assertEqual(lines[-1], "Undo:     /snooze cancel 3")
+
+    def test_pending_in_chat_has_one_reply_yes_line(self):
+        lines = self.render(PENDING, from_chat=True).splitlines()
+        self.assertEqual(lines[-2], "Undo:     /snooze cancel 3")
+        self.assertEqual(lines[-1], "Waiting:  not started. Reply `yes` within 10 min.")
+
+    def test_pending_in_cli_says_type_the_command(self):
+        lines = self.render(PENDING, from_chat=False).splitlines()
+        self.assertEqual(
+            lines[-1],
+            "Waiting:  not started. Type `/snooze yes 3` within 10 min (a bare `yes` only works in chat apps).",
+        )
+        self.assertEqual(sum(line.startswith("Waiting:") for line in lines), 1)
 
 
 if __name__ == "__main__":

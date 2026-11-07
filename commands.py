@@ -40,7 +40,11 @@ THEN_NOT_RUN_TEXT = "⚠️ The then-action was not run: it runs only when you c
 
 DEFAULT_EVERY = timedelta(minutes=10)  # used when the text gives no `every`
 
-DEFAULT_VALIDATE_SETUP = True
+DEFAULT_VALIDATE_SETUP = False
+
+# Where a snooze goes: the chat the command came from, or the profile's home channel.
+WHERE_CHAT = "this chat"
+WHERE_HOME = "home channel"
 DEFAULT_CAP_MINUTES = 120
 DEFAULT_CAP_REMINDERS = 10
 
@@ -410,16 +414,16 @@ class Commands:
     def _command_target(self, source: Any) -> tuple[Target | None, str]:
         target = target_from_source(source)
         if target is not None:
-            return target, "this chat"
-        return self._home_target(), "home channel"
+            return target, WHERE_CHAT
+        return self._home_target(), WHERE_HOME
 
     def _tool_target(self) -> tuple[Target | None, str]:
         platform = self._session_env("HERMES_SESSION_PLATFORM").strip().lower()
         chat_id = self._session_env("HERMES_SESSION_CHAT_ID").strip()
         if platform not in NON_CHAT_PLATFORMS and chat_id:
             user_id = self._session_env("HERMES_SESSION_USER_ID").strip()
-            return Target(platform=platform, chat_id=chat_id, user_id=user_id or None), "this chat"
-        return self._home_target(), "home channel"
+            return Target(platform=platform, chat_id=chat_id, user_id=user_id or None), WHERE_CHAT
+        return self._home_target(), WHERE_HOME
 
     def _add(self, spec: Spec, target: Target, *, test: bool = False) -> tuple[Snooze, bool, Settings, datetime]:
         """Store a new snooze for `spec`. Returns (record, whether its stop time is the cap, settings, now).
@@ -456,9 +460,21 @@ class Commands:
         return self._echo(record, now, where, capped, settings)
 
     def _echo(self, record: Snooze, now: datetime, where: str, capped: bool, settings: Settings) -> str:
-        """The echo of a new snooze, plus the warning if no gateway runs for the profile (none if it cannot be told)."""
+        """The echo of a new snooze, plus the warning if no gateway runs for the profile (none if it cannot be told).
+
+        `where` is WHERE_CHAT only when the snooze has a chat of its own (the echo's chat wording depends on it).
+        """
         off = self._gateway_running() is False
-        return echo.render_echo(record, now, where, capped, settings.cap_reminders, PENDING_TIMEOUT, gateway_off=off)
+        return echo.render_echo(
+            record,
+            now,
+            where,
+            capped,
+            settings.cap_reminders,
+            PENDING_TIMEOUT,
+            gateway_off=off,
+            from_chat=where == WHERE_CHAT,
+        )
 
     def _create_from_tool(self, args: dict) -> dict:
         settings = read_settings(self._ctx)
@@ -518,7 +534,10 @@ class Commands:
                 + (
                     "The snooze is running."
                     if started
-                    else "It has NOT started: the user must reply `yes` (nothing is sent before)."
+                    else (
+                        "It has NOT started: the user starts it with `yes` in a chat app, "
+                        f"or with `/snooze yes {record.id}`."
+                    )
                 )
             ),
         }
@@ -711,7 +730,9 @@ class Commands:
             if s.state == wanted:
                 return s, None
             if s.state == PENDING:
-                return None, (f"Snooze #{sid} has not started: reply `yes` to start it (or `/snooze cancel {sid}`).")
+                return None, (
+                    f"Snooze #{sid} has not started: send `/snooze yes {sid}` to start it (or `/snooze cancel {sid}`)."
+                )
             if s.state == ACTIVE:
                 return None, f"Snooze #{sid} is already running."
             return None, f"Snooze #{sid} is already {s.state}."

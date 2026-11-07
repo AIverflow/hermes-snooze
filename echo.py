@@ -111,8 +111,13 @@ def render_echo(
     cap_reminders: int,
     yes_window: timedelta,
     gateway_off: bool = False,
+    from_chat: bool = False,
 ) -> str:
-    """What the user sees after creating a snooze: local times, where, how to stop, how to undo."""
+    """What the user sees after creating a snooze: local times, where, how to stop, how to undo.
+
+    A pending snooze gets one "Waiting" line. `from_chat` picks the wording: a chat app can send a bare `yes`,
+    the CLI and Desktop cannot, so they get `/snooze yes <id>`.
+    """
     sched = snooze.schedule
     first = from_iso(sched.first_at)
     until = from_iso(sched.until)
@@ -140,8 +145,13 @@ def render_echo(
     lines.append(f"Undo:     /snooze cancel {snooze.id}")
     if pending:
         minutes = format_minutes(minutes_value(yes_window))
-        lines.append(f"Waiting:  nothing is sent until you reply yes (within {minutes})")
-        lines.append(f"Reply `yes` to start it (or `/snooze yes {snooze.id}`).")
+        if from_chat:
+            lines.append(f"Waiting:  not started. Reply `yes` within {minutes}.")
+        else:
+            lines.append(
+                f"Waiting:  not started. Type `/snooze yes {snooze.id}` within {minutes} "
+                "(a bare `yes` only works in chat apps)."
+            )
     if gateway_off:
         lines.append(GATEWAY_OFF_WARNING)
     return "\n".join(lines)

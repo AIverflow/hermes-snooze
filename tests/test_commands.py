@@ -105,14 +105,37 @@ class CreateTest(Base):
         ):
             self.assertIn(part, echo)
 
-    def test_validation_echo_ends_with_yes_prompt(self):
-        echo = self.run_cmd(self.FULL, source=telegram_source())
-        self.assertTrue(echo.endswith("Reply `yes` to start it (or `/snooze yes 1`)."), echo)
+    def test_new_snooze_starts_at_once_by_default(self):
+        s = self.create(self.FULL)
+        self.assertEqual(s.state, ACTIVE)
+        self.assertEqual(s.next_at, s.schedule.first_at)
 
-    def test_new_snooze_is_pending_by_default_and_nothing_is_due(self):
+    def test_started_echo_has_no_yes_line_and_ends_with_undo(self):
+        echo = self.run_cmd(self.FULL, source=telegram_source())
+        self.assertNotIn("`yes`", echo)
+        self.assertEqual(echo.splitlines()[-1], "Undo:     /snooze cancel 1")
+
+
+class ValidateSetupOnTest(Base):
+    config = {"validate_setup": True}
+    FULL = CreateTest.FULL
+
+    def test_new_snooze_is_pending_and_nothing_is_due(self):
         s = self.create(self.FULL)
         self.assertEqual(s.state, PENDING)
         self.assertIsNone(s.next_at)
+
+    def test_chat_echo_ends_with_yes_line(self):
+        echo = self.run_cmd(self.FULL, source=telegram_source())
+        self.assertEqual(echo.splitlines()[-2], "Undo:     /snooze cancel 1")
+        self.assertEqual(echo.splitlines()[-1], "Waiting:  not started. Reply `yes` within 10 min.")
+
+    def test_cli_echo_ends_with_type_yes_line(self):
+        echo = self.run_cmd(self.FULL, source=None)
+        self.assertEqual(
+            echo.splitlines()[-1],
+            "Waiting:  not started. Type `/snooze yes 1` within 10 min (a bare `yes` only works in chat apps).",
+        )
 
     def test_stored_record(self):
         s = self.create(self.FULL)
@@ -373,7 +396,7 @@ class OkTest(Base):
         self.add(state=PENDING)
         reply = self.run_cmd("ok 1")
         self.assertIn("has not started", reply)
-        self.assertIn("`yes`", reply)
+        self.assertIn("`/snooze yes 1`", reply)
         self.assertEqual(self.store.load()[0].state, PENDING)
 
     def test_ok_on_finished(self):
@@ -509,6 +532,7 @@ class YesTest(Base):
         self.assertIn("Started #1", self.run_cmd("yes"))
 
     def test_full_flow_from_create_to_yes(self):
+        self.ctx.config["validate_setup"] = True
         self.run_cmd("Test in 1m every 1m", source=telegram_source())
         self.assertEqual(self.store.load()[0].state, PENDING)
         self.now = NOW + timedelta(minutes=2)
@@ -641,6 +665,7 @@ class ToolTest(Base):
         }
 
     def test_creates_a_pending_snooze_with_echo(self):
+        self.ctx.config["validate_setup"] = True
         result = self.call(
             text="Send email to John Doe",
             first_at="2026-11-07T16:00",
@@ -652,8 +677,9 @@ class ToolTest(Base):
         self.assertEqual((result["id"], result["state"]), (1, PENDING))
         self.assertIn("today 16:00", result["message"])
         self.assertIn("stops 18:00", result["message"])
-        self.assertTrue(result["message"].endswith("Reply `yes` to start it (or `/snooze yes 1`)."))
+        self.assertTrue(result["message"].endswith("Waiting:  not started. Reply `yes` within 10 min."))
         self.assertIn("NOT started", result["note"])
+        self.assertIn("`/snooze yes 1`", result["note"])
         s = self.store.load()[0]
         self.assertEqual(s.schedule.first_at, "2026-11-07T15:00:00+00:00")
         self.assertEqual(s.schedule.until, "2026-11-07T17:00:00+00:00")
@@ -661,13 +687,23 @@ class ToolTest(Base):
         self.assertEqual(s.then, "close ticket 42")
         self.assertEqual(s.target, Target("telegram", "123", "42"))
 
-    def test_validate_setup_off_starts_at_once(self):
-        self.ctx.config["validate_setup"] = False
+    def test_starts_at_once_by_default(self):
         result = self.call(text="Wake up", first_at="2026-11-07T16:00")
         self.assertEqual(result["state"], ACTIVE)
         self.assertNotIn("`yes`", result["message"])
         s = self.store.load()[0]
         self.assertEqual(s.next_at, s.schedule.first_at)
+
+    def test_pending_without_chat_uses_cli_wording(self):
+        self.ctx.config["validate_setup"] = True
+        self.env = {}  # no session chat: the home channel is the target
+        result = self.call(text="Wake up", first_at="2026-11-07T16:00")
+        self.assertTrue(
+            result["message"].endswith(
+                "Waiting:  not started. Type `/snooze yes 1` within 10 min (a bare `yes` only works in chat apps)."
+            ),
+            result["message"],
+        )
 
     def test_defaults_match_the_command(self):
         self.call(text="Wake up", first_at="2026-11-07T16:00")
@@ -783,7 +819,7 @@ class SettingsTest(unittest.TestCase):
     def test_invalid_values_fall_back(self):
         ctx = FakeCtx(validate_setup="maybe", cap_minutes=-5, cap_reminders="lots", timezone="Mars/Base")
         settings = commands.read_settings(ctx)
-        self.assertEqual((settings.validate_setup, settings.cap_minutes, settings.cap_reminders), (True, 120, 10))
+        self.assertEqual((settings.validate_setup, settings.cap_minutes, settings.cap_reminders), (False, 120, 10))
         self.assertEqual(settings.timezone, commands.system_timezone())
 
     def test_caps_apply_to_new_snoozes(self):

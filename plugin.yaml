@@ -23,8 +23,8 @@ provides_hooks:
 config_schema:
   validate_setup:
     type: bool
-    default: true
-    description: "Require a reply of 'yes' before a new snooze starts."
+    default: false
+    description: "Require a reply of 'yes' (within 10 minutes) before a new snooze starts. Off: it starts at once."
   cap_minutes:
     type: int
     default: 120

@@ -36,7 +36,7 @@ Requires Hermes Agent 0.22.7 or later and Python 3.10+.
    ```
 
 5. The plugin answers with an echo: what, when (in your time zone), how to stop it, where it goes, how to undo it.
-6. By default a new snooze waits for you to reply `yes` (within 10 minutes) before it starts. Reply `yes` or send `/snooze yes`.
+6. A new snooze starts at once. If you set `validate_setup: true` (see [Configuration](#configuration)), it waits for your `yes` (within 10 minutes) first. A bare `yes` only works in a chat app; from the CLI send `/snooze yes <id>`.
 7. When the reminders arrive, reply `ok` to stop them, or `later 30` to push them back 30 minutes.
 
 A snooze made from the CLI (no chat) goes to the first home channel set in your profile.
@@ -140,7 +140,7 @@ plugins:
   entries:
     snooze:
       settings:
-        validate_setup: true
+        validate_setup: false
         cap_minutes: 120
         cap_reminders: 10
         timezone: Europe/Paris
@@ -148,7 +148,7 @@ plugins:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `validate_setup` | `true` | A new snooze waits for your `yes` (10 minutes) before it starts. `false` starts it at once. |
+| `validate_setup` | `false` | `true`: a new snooze waits for your `yes` (10 minutes) before it starts. `false`: it starts at once. |
 | `cap_minutes` | `120` | Without `until`, a snooze stops this many minutes after its first reminder. |
 | `cap_reminders` | `10` | A snooze never sends more than this many reminders. |
 | `timezone` | `system` | IANA zone name such as `Europe/Paris`, or `system` for the machine's zone. An unknown name falls back to `system`. |
@@ -157,7 +157,7 @@ plugins:
 
 | State | Meaning |
 |---|---|
-| `pending` | Created, waiting for `yes`. If no `yes` comes within 10 minutes it is never started (`missed`). |
+| `pending` | Created, waiting for `yes` (only with `validate_setup: true`). If no `yes` comes within 10 minutes it is never started (`missed`). |
 | `active` | Reminders are being sent. |
 | `done` | You confirmed. |
 | `missed` | Not started in time, or the cap was reached without a confirm. |
