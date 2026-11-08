@@ -6,7 +6,7 @@ Pure module: standard library plus the store's `Snooze` record.
 
 `snoozes` are `store.Snooze` records; only those in state "active" or "pending"
 count. Their `confirm` is the dict the store keeps: {"kind": "ok" | "word" |
-"contains" | "any" | "emoji", "value": "<text>"}; `None` or an empty value means
+"contains" | "any" | "emoji" | "choice", "value": "<text>"}; `None` or an empty value means
 the default (`ok`). `schedule.every` (minutes) is the default `later` delay.
 
 `sender` says who wrote the message. For a reaction, `message` is the emoji (a
@@ -14,7 +14,7 @@ string or a list of strings), `sender.user_id` is None (reactions carry none)
 and `sender.chat_type` must say it is a private chat.
 
 The matching rules (who can answer, `later`, pass-through, text folding) are
-documented in the README ("Confirming").
+documented in `docs/user-guide.md` ("Confirmations").
 """
 
 import re
@@ -72,6 +72,7 @@ class Decision:
     snooze_id: int | None = None  # the snooze concerned (None for "none")
     later_minutes: int | None = None  # only for "later"
     pass_through: bool = True  # True: let the message reach the agent
+    answer: str | None = None  # the option or message text that confirmed the occurrence
 
 
 _NO_MATCH = Decision()
@@ -126,7 +127,7 @@ def _find(tokens: list[str], needle: list[str]) -> int:
 # ---------------------------------------------------------------- confirm rule
 
 
-def _parse_rule(rule: dict | None) -> tuple[str, list[str]]:
+def _parse_rule(rule: dict | None) -> tuple[str, list[str] | list[list[str]]]:
     """Return (kind, value tokens) for a stored confirm rule."""
     rule = rule or {}
     kind = str(rule.get("kind") or "ok").lower()
@@ -135,6 +136,8 @@ def _parse_rule(rule: dict | None) -> tuple[str, list[str]]:
         return "ok", ["ok"]
     if kind == "any":
         return "any", []
+    if kind == "choice":
+        return "choice", [_tokens(option) for option in str(rule.get("value") or "").split("|")]
     if kind == "word" and tokens and not _has_words(tokens):
         kind = "emoji"
     if kind in ("word", "emoji", "contains") and not tokens:
@@ -142,26 +145,35 @@ def _parse_rule(rule: dict | None) -> tuple[str, list[str]]:
     return kind, tokens
 
 
-def _confirm_match(rule: dict | None, tokens: list[str]):
-    """Return (matched, pass_through) for a message against a rule."""
+def _confirm_match(rule: dict | None, tokens: list[str], message: str):
+    """Return (matched, pass_through, answer) for a message against a rule."""
     kind, value = _parse_rule(rule)
     if not tokens:
-        return False, False
+        return False, False, None
     if kind == "any":
-        return True, False
+        return True, False, message.strip()
     if kind == "contains":
-        return _find(tokens, value) >= 0, False
+        matched = _find(tokens, value) >= 0
+        return matched, False, message.strip() if matched else None
+    if kind == "choice":
+        options = str((rule or {}).get("value") or "").split("|")
+        for index, option_tokens in enumerate(value, start=1):
+            if tokens[0] == str(index):
+                return True, _has_words(tokens[1:]), options[index - 1]
+            if option_tokens and tokens[: len(option_tokens)] == option_tokens:
+                return True, _has_words(tokens[len(option_tokens) :]), options[index - 1]
+        return False, False, None
     if kind in ("ok", "word"):
         if tokens[: len(value)] != value:
-            return False, False
-        return True, _has_words(tokens[len(value) :])
+            return False, False, None
+        return True, _has_words(tokens[len(value) :]), None
     if kind == "emoji":
         i = _find(tokens, value)
         if i < 0:
-            return False, False
+            return False, False, None
         rest = tokens[:i] + tokens[i + len(value) :]
-        return True, _has_words(rest)
-    return False, False
+        return True, _has_words(rest), None
+    return False, False, None
 
 
 def _is_emoji_rule(rule: dict | None) -> bool:
@@ -223,8 +235,11 @@ def _authorized(snooze: Snooze, sender: Sender, is_reaction: bool) -> bool:
 
 def _last_sent(snoozes: list[Snooze]) -> Snooze | None:
     """The snooze that sent a reminder last (ISO timestamps sort as text); later ones win ties."""
-    sent = [(s.last_sent_at, i, s) for i, s in enumerate(snoozes) if s.last_sent_at is not None]
-    return max(sent, key=lambda item: item[:2])[2] if sent else None
+    return max(
+        (s for s in reversed(snoozes) if s.last_sent_at is not None),
+        key=lambda s: s.last_sent_at,
+        default=None,
+    )
 
 
 # ---------------------------------------------------------------- entry point
@@ -260,7 +275,11 @@ def match(
         pending = pendings[-1] if pendings else None
 
     if is_reaction:
-        if active is not None and _is_emoji_rule(active.confirm) and _confirm_match(active.confirm, tokens)[0]:
+        if (
+            active is not None
+            and _is_emoji_rule(active.confirm)
+            and _confirm_match(active.confirm, tokens, str(message))[0]
+        ):
             return Decision(CONFIRM, active.id, None, False)
         return _NO_MATCH
 
@@ -268,9 +287,9 @@ def match(
         is_later, minutes = _later(tokens)
         if is_later:
             return Decision(LATER, active.id, minutes if minutes is not None else _default_later(active), False)
-        matched, extra = _confirm_match(active.confirm, tokens)
+        matched, extra, answer = _confirm_match(active.confirm, tokens, str(message))
         if matched:
-            return Decision(CONFIRM, active.id, None, extra)
+            return Decision(CONFIRM, active.id, None, extra, answer)
 
     if pending is not None and tokens == ["yes"]:
         return Decision(YES, pending.id, None, False)

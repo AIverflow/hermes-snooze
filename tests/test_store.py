@@ -61,6 +61,7 @@ class RoundTripTest(TmpCase):
             last_message_id=99,
             last_error="boom",
             test=True,
+            answer="french",
         )
         saved = self.store.add(s)
         self.assertEqual(saved.id, 1)
@@ -68,6 +69,32 @@ class RoundTripTest(TmpCase):
         self.assertEqual(loaded, [s])
         self.assertEqual(loaded[0].schedule.tz, "Europe/Paris")
         self.assertEqual(loaded[0].target.chat_id, "123")
+        self.assertEqual(loaded[0].answer, "french")
+
+    def test_old_record_loads_without_answer(self):
+        self.store.add(make())
+        doc = json.loads(self.store.path.read_text())
+        del doc["snoozes"][0]["answer"]
+        self.store.path.write_text(json.dumps(doc))
+        self.assertIsNone(self.store.load()[0].answer)
+
+    def test_schedule_days_and_span_round_trip(self):
+        s = make()
+        s.schedule.days = [0, 2, 4]
+        s.schedule.span = 90.5
+        loaded = self.store.add(s)
+        self.assertEqual(loaded.schedule.days, [0, 2, 4])
+        self.assertEqual(loaded.schedule.span, 90.5)
+
+    def test_schedule_without_recurrence_fields_loads_with_defaults(self):
+        self.store.add(make())
+        doc = json.loads(self.store.path.read_text())
+        del doc["snoozes"][0]["schedule"]["days"]
+        del doc["snoozes"][0]["schedule"]["span"]
+        self.store.path.write_text(json.dumps(doc))
+        loaded = self.store.load()[0]
+        self.assertIsNone(loaded.schedule.days)
+        self.assertIsNone(loaded.schedule.span)
 
     def test_ids_increment_and_are_not_reused(self):
         a, b = self.store.add(make("a")), self.store.add(make("b"))

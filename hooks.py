@@ -4,7 +4,7 @@ Hermes glue: nothing from Hermes is imported at the top of this file, so the mod
 loads (and the tests run) without Hermes. What is accepted as an answer is decided by
 `confirm.match`; the state changes are the ones of the `/snooze ok | later | yes`
 commands (`commands.confirm_snooze`, `push_back_snooze`, `start_snooze`). The
-behaviour is documented in the README ("Confirming").
+behaviour is documented in `docs/user-guide.md` ("Confirmations").
 
 Two hooks, both cheap when the chat has no running or waiting snooze (one small file
 read, no lock):
@@ -13,7 +13,7 @@ read, no lock):
   lane, so an answer counts while the agent is busy. A pure answer is dropped (`skip`);
   "ok, and tell me a joke" is answered and still passes on to the agent. Slash commands
   are never read as an answer. If the snooze has a `then`, the message is rewritten into
-  the agent turn instead (`THEN_PROMPT`).
+  the agent turn instead (`then_prompt`).
 - `gateway_platform_event` (sync): a Telegram reaction on the last reminder message. It
   carries no user id and no chat type, so only private chats are accepted: Telegram
   gives them positive chat ids. Hermes has already authorized the reactor.
@@ -43,10 +43,24 @@ SKIP = {"action": "skip", "reason": "snooze: answer to a reminder"}
 _background_tasks: set = set()  # strong references: the event loop keeps only weak ones
 
 
-# What the agent receives (PLAN §5). The behaviour is documented in the README ("The then action").
-THEN_PROMPT = (
-    "The user confirmed the reminder '{text}'. Now do this: {then}. Then tell the user the result in one line."
-)
+# What the agent receives (PLAN §5). See `docs/user-guide.md` ("Follow-up actions").
+def then_prompt(snooze: Snooze, extra: str | None = None) -> str:
+    """Build the follow-up request shared by rewrite and injection paths."""
+    if snooze.answer is not None:
+        prompt = (
+            f"The user confirmed the reminder '{snooze.text}' with the answer '{snooze.answer}'. "
+            f"Now do this: {snooze.then}. Then tell the user the result in one line."
+        )
+    else:
+        prompt = (
+            f"The user confirmed the reminder '{snooze.text}'. Now do this: {snooze.then}. "
+            "Then tell the user the result in one line."
+        )
+    if extra:
+        prompt += f"\nThe user also wrote: {extra}"
+    return prompt
+
+
 INJECT_REFUSED = (
     "Hermes did not accept the turn. Set plugins.entries.snooze.allow_gateway_injection: true "
     "and make sure the gateway is running."
@@ -174,9 +188,7 @@ class Hooks:
         if decision.action == CONFIRM and snooze.then:
             # The user's own message becomes the agent turn: right session, normal authorization, and
             # no `allow_gateway_injection` needed (gateway/run_inbound_hooks.py:69-110, the `rewrite` action).
-            prompt = THEN_PROMPT.format(text=snooze.text, then=snooze.then)
-            if decision.pass_through:
-                prompt += f"\nThe user also wrote: {text}"
+            prompt = then_prompt(snooze, text if decision.pass_through else None)
             return {"action": "rewrite", "text": prompt}
         return None if decision.pass_through else SKIP
 
@@ -276,7 +288,7 @@ class Hooks:
             if snooze is None or snooze.state != wanted:
                 return None
             if decision.action == CONFIRM:
-                reply = commands.confirm_snooze(snooze)
+                reply = commands.confirm_snooze(snooze, now, decision.answer)
             elif decision.action == LATER:
                 reply = commands.push_back_snooze(snooze, now, decision.later_minutes)
             else:
@@ -292,7 +304,7 @@ class Hooks:
         if self._inject is None:
             return "this Hermes has no inject_message"
         try:
-            prompt = THEN_PROMPT.format(text=snooze.text, then=snooze.then)
+            prompt = then_prompt(snooze)
             accepted = self._inject(prompt, origin=then_origin(snooze.target, source))
         except Exception as exc:
             log.warning("snooze: then-action failed", exc_info=True)
@@ -306,7 +318,7 @@ class Hooks:
         message instead (`_on_message`). Called after "✅ Done" is sent, on the gateway loop.
         `inject_message` queues one agent turn in that chat (in this plugin's own profile); it needs
         `allow_gateway_injection` and only works inside the gateway. If Hermes refuses or fails, the chat gets
-        "⚠️ then-action failed: <reason>". See the README ("The then action").
+        "⚠️ then-action failed: <reason>". See `docs/user-guide.md` ("Follow-up actions").
         """
         if not snooze.then:
             return

@@ -59,6 +59,44 @@ class PlanTableTest(unittest.TestCase):
         self.assertEqual(s.then, "start the coffee machine")
 
 
+class LongDurationUnitsTest(unittest.TestCase):
+    def assert_delay(self, text, expected):
+        s = parse(text)
+        self.assertIsInstance(s, p.Spec, s)
+        self.assertEqual(s.text, text.split(" in ")[0])
+        self.assertEqual(s.first_at, NOW.astimezone(UTC) + expected)
+
+    def test_hour_with_and_without_space(self):
+        self.assert_delay("Call mom in 1 hour", timedelta(hours=1))
+        self.assert_delay("Call mom in 1hour", timedelta(hours=1))
+
+    def test_long_units_in_combined_schedule(self):
+        s = parse("Pill in 30 minutes every 5 minutes")
+        self.assertEqual(s.first_at, NOW.astimezone(UTC) + timedelta(minutes=30))
+        self.assertEqual(s.every, timedelta(minutes=5))
+
+        s = parse("Stretch in 2 hours every 1 hour")
+        self.assertEqual(s.first_at, NOW.astimezone(UTC) + timedelta(hours=2))
+        self.assertEqual(s.every, timedelta(minutes=60))
+
+    def test_compound_and_seconds(self):
+        self.assert_delay("Tea in 1 hour 30 minutes", timedelta(minutes=90))
+        self.assert_delay("Tea in 90 seconds", timedelta(seconds=90))
+
+    def test_long_units_in_short_form(self):
+        s = parse("Wake up 8am 10 minutes")
+        self.assertEqual(s.first_at, paris(8, day=8))
+        self.assertEqual(s.every, timedelta(minutes=10))
+
+    def test_case_insensitive_long_unit(self):
+        self.assert_delay("Call mom in 1 Hour", timedelta(hours=1))
+
+    def test_seconds_below_minimum_remain_refused(self):
+        error = parse("Call mom in 30 seconds")
+        self.assertIsInstance(error, p.ParseError)
+        self.assertIn("too short", error.message)
+
+
 class ConfirmTableTest(unittest.TestCase):
     def confirm(self, tail):
         s = parse("Do it at 4pm " + tail)
@@ -86,6 +124,24 @@ class ConfirmTableTest(unittest.TestCase):
 
     def test_emoji_with_variation_selector(self):
         self.assertEqual(self.confirm("ok ✔️"), p.ConfirmRule("emoji", "✔️"))
+
+    def test_choice_keeps_exact_value(self):
+        self.assertEqual(self.confirm("ok asian|French|italian"), p.ConfirmRule("choice", "asian|French|italian"))
+
+    def test_choice_invalid_options(self):
+        for arg in ("a|", "a|b|c|d|e|f|g|h|i|j", "a||b", "A|a", "|"):
+            with self.subTest(arg=arg):
+                result = p.parse_ok_arg(arg)
+                self.assertIsInstance(result, p.ParseError)
+                self.assertTrue(result.example.startswith("/snooze "))
+
+    def test_choice_with_other_clauses(self):
+        s = parse("Dinner at 8pm every 10m ok asian|french then order it")
+        self.assertIsInstance(s, p.Spec)
+        self.assertEqual(s.text, "Dinner")
+        self.assertEqual(s.every, timedelta(minutes=10))
+        self.assertEqual(s.confirm, p.ConfirmRule("choice", "asian|french"))
+        self.assertEqual(s.then, "order it")
 
 
 class KeywordOrderTest(unittest.TestCase):
@@ -280,6 +336,56 @@ class SpacedDurationTest(unittest.TestCase):
     def test_number_without_unit_stays_in_text(self):
         s = parse("Take 2 pills at 8am")
         self.assertEqual(s.text, "Take 2 pills")
+
+
+class RecurrenceTest(unittest.TestCase):
+    def test_parse_days_lists_ranges_and_case(self):
+        self.assertEqual(p.parse_days("mon,thu"), frozenset({0, 3}))
+        self.assertEqual(p.parse_days("mon-wed,fri"), frozenset({0, 1, 2, 4}))
+        self.assertEqual(p.parse_days("MON-FRI"), frozenset({0, 1, 2, 3, 4}))
+        self.assertIsNone(p.parse_days("fri-mon"))
+
+    def test_daily_and_weekdays(self):
+        daily = parse("Take pill at 8am daily")
+        weekdays = parse("Take pill at 8am weekdays")
+        self.assertEqual(daily.days, frozenset(range(7)))
+        self.assertEqual(weekdays.days, frozenset(range(5)))
+
+    def test_on_days(self):
+        self.assertEqual(parse("Water plants at 8am on mon,thu").days, frozenset({0, 3}))
+        self.assertEqual(parse("Water plants at 8am on mon-wed,fri").days, frozenset({0, 1, 2, 4}))
+        self.assertEqual(parse("Water plants at 8am on MON-FRI").days, frozenset(range(5)))
+
+    def test_invalid_range_stays_in_text(self):
+        s = parse("Take pill at 8am on fri-mon")
+        self.assertIsInstance(s, p.ParseError)
+        self.assertIn("Missing when to start", s.message)
+
+    def test_on_shelf_stays_in_text(self):
+        s = parse("Put the book on shelf at 8am")
+        self.assertEqual(s.text, "Put the book on shelf")
+        self.assertIsNone(s.days)
+
+    def test_recurrence_with_in_is_an_error(self):
+        result = parse("Take pill in 1h daily")
+        self.assertIsInstance(result, p.ParseError)
+        self.assertEqual(result.message, "A recurring snooze needs `at <time>`, not `in`.")
+        self.assertIn("daily", result.example)
+
+    def test_short_form_with_daily(self):
+        s = parse("Wake up 8am 10m daily")
+        self.assertEqual(s.text, "Wake up")
+        self.assertEqual(s.every, timedelta(minutes=10))
+        self.assertEqual(s.days, frozenset(range(7)))
+
+    def test_weekdays_skips_saturday(self):
+        s = parse("Wake up weekdays at 8am")
+        self.assertEqual(s.first_at, paris(8, day=9))
+
+    def test_daily_at_end_of_text_is_read_as_clause(self):
+        s = parse("Read the daily at 8am")
+        self.assertEqual(s.text, "Read the")
+        self.assertEqual(s.days, frozenset(range(7)))
         self.assertIsNone(s.every)
 
     def test_number_unit_in_text_is_kept_as_written(self):

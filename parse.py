@@ -1,7 +1,7 @@
 """Turn the text after ``/snooze`` into a ``Spec`` (or a ``ParseError``).
 
 Pure module: standard library only, no Hermes imports. The grammar is
-documented in the README ("Writing a snooze"). ``parse`` returns the error
+documented in `docs/user-guide.md` ("Create a reminder"). ``parse`` returns the error
 instead of raising it.
 """
 
@@ -15,17 +15,39 @@ MIN_DURATION = timedelta(minutes=1)
 
 _KEYWORDS = frozenset({"at", "in", "every", "until", "ok", "then"})
 _PREPOSITIONS = frozenset({"before", "by", "after", "around", "since", "from", "to"})
+_DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_DAYS = {name: day for day, name in enumerate(_DAY_NAMES)}
 
 _TIME_RE = re.compile(r"^(\d{1,2})(?::(\d{2}))?(am|pm)?$")
 # `\s*` lets a duration be one word ("2m") or words joined by `_join_number_units` ("1 h 30 min").
-_DURATION_RE = re.compile(r"^(?:\d+\s*(?:sec|min|hr|s|m|h)\s*)+$")
-_DURATION_PART_RE = re.compile(r"(\d+)\s*(sec|min|hr|s|m|h)")
-_UNIT_SECONDS = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hr": 3600}
+_DURATION_RE = re.compile(
+    r"^(?:\d+\s*(?:hours|hour|hrs|hr|h|minutes|minute|mins|min|m|"
+    r"seconds|second|secs|sec|s)\s*)+$"
+)
+_DURATION_PART_RE = re.compile(r"(\d+)\s*(hours|hour|hrs|hr|h|minutes|minute|mins|min|m|seconds|second|secs|sec|s)")
+_UNIT_SECONDS = {
+    "s": 1,
+    "sec": 1,
+    "secs": 1,
+    "second": 1,
+    "seconds": 1,
+    "m": 60,
+    "min": 60,
+    "mins": 60,
+    "minute": 60,
+    "minutes": 60,
+    "h": 3600,
+    "hr": 3600,
+    "hrs": 3600,
+    "hour": 3600,
+    "hours": 3600,
+}
 
 EXAMPLE_FULL = "/snooze Send email to John Doe at 4pm every 10m until 6pm then close ticket 42"
 EXAMPLE_SHORT = "/snooze Wake up 8am 10m"
 EXAMPLE_LONG = "/snooze Wake up at 8am every 10m"
 EXAMPLE_IN = "/snooze Take my pill in 30m every 5m ok taken"
+EXAMPLE_RECURRING = "/snooze Take my pill at 8am daily"
 
 
 @dataclass(frozen=True)
@@ -43,6 +65,7 @@ class Spec:
     confirm: ConfirmRule
     then: str | None
     tz: str
+    days: frozenset[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -116,15 +139,60 @@ def _next_occurrence(t: time, after: datetime, zone: _tzinfo) -> datetime:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def parse_days(word: str) -> frozenset[int] | None:
+    """Parse cron-style weekday names, lists, and non-wrapping ranges."""
+    days: set[int] = set()
+    for part in word.casefold().split(","):
+        if "-" in part:
+            if part.count("-") != 1:
+                return None
+            first, last = part.split("-")
+            if first not in _DAYS or last not in _DAYS or _DAYS[first] > _DAYS[last]:
+                return None
+            days.update(range(_DAYS[first], _DAYS[last] + 1))
+        else:
+            if part not in _DAYS:
+                return None
+            days.add(_DAYS[part])
+    return frozenset(days) if days else None
+
+
+def next_on_days(t: time, after: datetime, zone: _tzinfo, days: frozenset[int]) -> datetime:
+    """Find the first local wall-clock time on an allowed weekday, strictly after ``after``."""
+    if not days:
+        raise ValueError("days must not be empty")
+    day = after.astimezone(zone).date()
+    for offset in range(8):
+        candidate_day = day + timedelta(days=offset)
+        if candidate_day.weekday() not in days:
+            continue
+        candidate = datetime.combine(candidate_day, t, tzinfo=zone).astimezone(timezone.utc)
+        if candidate > after:
+            return candidate
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _is_emoji(word: str) -> bool:
     return any(ord(c) > 127 for c in word) and not any(c.isalnum() for c in word)
 
 
 def parse_ok_arg(arg: str) -> ConfirmRule | ParseError:
-    """The rule for the word after ``ok``: ``any``, ``contains:<word>``, an emoji or a word."""
+    """The rule after ``ok``: ``any``, choices, ``contains:<word>``, emoji or a word."""
     low = arg.casefold()
     if low == "any":
         return ConfirmRule("any")
+    if "|" in arg:
+        options = arg.split("|")
+        if (
+            not 2 <= len(options) <= 9
+            or any(not any(c.isalnum() for c in option) for option in options)
+            or len({option.casefold() for option in options}) != len(options)
+        ):
+            return ParseError(
+                "`ok` choices need 2 to 9 non-empty, distinct options (ignoring case).",
+                "/snooze Dinner? at 8pm ok asian|french|italian",
+            )
+        return ConfirmRule("choice", arg)
     if low.startswith("contains:"):
         value = arg[len("contains:") :]
         if any(c.isalnum() for c in value):
@@ -149,6 +217,7 @@ class _Clauses:
     every: timedelta | None = None
     until: time | None = None
     confirm: ConfirmRule | None = None
+    days: frozenset[int] | None = None
 
 
 def _too_short(what: str, example: str) -> ParseError:
@@ -162,6 +231,12 @@ def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
     """
     c = _Clauses(end=len(words))
     while c.end > 0:
+        if low[c.end - 1] in ("daily", "weekdays"):
+            if c.days is not None:
+                break
+            c.days = frozenset(range(7)) if low[c.end - 1] == "daily" else frozenset(range(5))
+            c.end -= 1
+            continue
         if low[c.end - 1] == "ok":
             if c.confirm is not None:
                 break
@@ -182,6 +257,11 @@ def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
             if moment is None or c.until is not None:
                 break
             c.until = moment
+        elif keyword == "on":
+            days = parse_days(arg)
+            if days is None or c.days is not None:
+                break
+            c.days = days
         elif keyword in ("in", "every"):
             duration = parse_duration(arg)
             if duration is None:
@@ -269,6 +349,8 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
     c = _read_clauses(words, low)
     if isinstance(c, ParseError):
         return c
+    if c.days is not None and c.delay is not None:
+        return ParseError("A recurring snooze needs `at <time>`, not `in`.", EXAMPLE_RECURRING)
     if c.at is None and c.delay is None:
         error = _read_short_form(c, words, low)
         if error:
@@ -280,7 +362,12 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
     if c.at is None and c.delay is None:
         return ParseError("Missing when to start: add `at <time>` or `in <duration>`.", EXAMPLE_LONG)
 
-    first_at = now_utc + c.delay if c.delay is not None else _next_occurrence(c.at, now_utc, zone)
+    if c.delay is not None:
+        first_at = now_utc + c.delay
+    elif c.days is not None:
+        first_at = next_on_days(c.at, now_utc, zone, c.days)
+    else:
+        first_at = _next_occurrence(c.at, now_utc, zone)
     until = _next_occurrence(c.until, first_at, zone) if c.until is not None else None
 
     return Spec(
@@ -291,4 +378,5 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
         confirm=c.confirm or ConfirmRule(),
         then=then_text,
         tz=tz_name,
+        days=c.days,
     )

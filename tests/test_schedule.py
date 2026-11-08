@@ -22,6 +22,10 @@ def make(state=ACTIVE, next_at=NOW, every=10, until=None, sent_count=0, created=
     )
 
 
+def utc_iso(local):
+    return local.astimezone(timezone.utc).isoformat()
+
+
 class DueTest(unittest.TestCase):
     def test_send_on_time(self):
         self.assertEqual(schedule.due(make(), NOW, CAP), Action("send"))
@@ -162,6 +166,89 @@ class ApplyLaterTest(unittest.TestCase):
     def test_no_next_at_pushes_from_now(self):
         s = make(next_at=None)
         self.assertEqual(schedule.apply_later(s, NOW, 10), NOW + timedelta(minutes=10))
+
+
+class RearmTest(unittest.TestCase):
+    def recurring(self, first_local, days, span=60, until_local=None):
+        first = first_local.astimezone(timezone.utc)
+        if until_local:
+            until = until_local.astimezone(timezone.utc)
+        elif span is not None:
+            until = first + timedelta(minutes=span)
+        else:
+            until = None
+        snooze = make(next_at=NOW, until=until, sent_count=3)
+        snooze.schedule.first_at = first.isoformat()
+        snooze.schedule.tz = "Europe/Paris"
+        snooze.schedule.days = sorted(days)
+        snooze.schedule.span = span
+        snooze.last_sent_at = NOW.isoformat()
+        snooze.last_message_id = 123
+        snooze.last_error = "send failed"
+        return snooze
+
+    def test_rearms_from_friday_to_monday_and_resets_occurrence_fields(self):
+        paris = ZoneInfo("Europe/Paris")
+        first = datetime(2026, 11, 6, 8, tzinfo=paris)
+        snooze = self.recurring(first, range(5), span=120)
+        now = datetime(2026, 11, 6, 9, tzinfo=paris).astimezone(timezone.utc)
+
+        new_first = schedule.rearm(snooze, now)
+
+        self.assertEqual(new_first.astimezone(paris), datetime(2026, 11, 9, 8, tzinfo=paris))
+        self.assertEqual(snooze.schedule.first_at, utc_iso(new_first))
+        self.assertEqual(snooze.schedule.until, utc_iso(new_first + timedelta(minutes=120)))
+        self.assertEqual(snooze.next_at, utc_iso(new_first))
+        self.assertEqual(snooze.state, ACTIVE)
+        self.assertEqual(snooze.sent_count, 0)
+        self.assertIsNone(snooze.last_sent_at)
+        self.assertIsNone(snooze.last_message_id)
+        self.assertIsNone(snooze.last_error)
+
+    def test_rearm_keeps_eight_local_across_paris_dst_change(self):
+        paris = ZoneInfo("Europe/Paris")
+        first = datetime(2026, 3, 28, 8, tzinfo=paris)
+        snooze = self.recurring(first, range(7), span=60)
+        now = datetime(2026, 3, 29, 8, 30, tzinfo=paris).astimezone(timezone.utc)
+
+        new_first = schedule.rearm(snooze, now)
+
+        self.assertEqual(first.astimezone(paris).strftime("%H:%M"), "08:00")
+        self.assertEqual(new_first.astimezone(paris), datetime(2026, 3, 30, 8, tzinfo=paris))
+        self.assertEqual(new_first.astimezone(paris).strftime("%H:%M"), "08:00")
+
+    def test_rearm_uses_span_after_later_moved_until(self):
+        paris = ZoneInfo("Europe/Paris")
+        first = datetime(2026, 11, 6, 8, tzinfo=paris)
+        snooze = self.recurring(first, range(5), span=60)
+        moved_until = datetime(2026, 11, 6, 12, tzinfo=paris).astimezone(timezone.utc)
+        snooze.schedule.until = moved_until.isoformat()
+        original_span = snooze.schedule.span
+        now = datetime(2026, 11, 6, 13, tzinfo=paris).astimezone(timezone.utc)
+
+        new_first = schedule.rearm(snooze, now)
+
+        self.assertEqual(snooze.schedule.span, original_span)
+        self.assertEqual(snooze.schedule.until, utc_iso(new_first + timedelta(minutes=60)))
+
+    def test_missing_span_keeps_old_until_distance(self):
+        paris = ZoneInfo("Europe/Paris")
+        first = datetime(2026, 11, 6, 8, tzinfo=paris)
+        old_until = datetime(2026, 11, 6, 10, tzinfo=paris)
+        snooze = self.recurring(first, range(5), span=None, until_local=old_until)
+        now = datetime(2026, 11, 6, 9, tzinfo=paris).astimezone(timezone.utc)
+
+        new_first = schedule.rearm(snooze, now)
+
+        self.assertEqual(snooze.schedule.until, utc_iso(new_first + timedelta(hours=2)))
+
+    def test_is_recurring_requires_nonempty_days(self):
+        snooze = make()
+        self.assertFalse(schedule.is_recurring(snooze))
+        snooze.schedule.days = []
+        self.assertFalse(schedule.is_recurring(snooze))
+        snooze.schedule.days = [0]
+        self.assertTrue(schedule.is_recurring(snooze))
 
 
 class PendingExpiryTest(unittest.TestCase):

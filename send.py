@@ -3,7 +3,7 @@
 Hermes glue. `Timer.tick()` is one pass over the store; `Timer.run()` repeats it every
 `TICK_SECONDS` in a background task started by `register()`. The rules (what is due, what
 comes next) are in `schedule.py`; the texts are in `echo.py`. Sending goes through a `Sender`,
-so tests use a fake one. How the timer fits the life cycle is in the README.
+so tests use a fake one. See `docs/user-guide.md` for the reminder lifecycle.
 
 Hermes imports stay inside functions: the package loads without Hermes.
 """
@@ -24,7 +24,7 @@ from typing import Any, Protocol
 
 from . import echo
 from .commands import hermes_data_dir, not_started_message, read_settings
-from .schedule import EXPIRE, MISS, NOTHING, SEND, Action, after_send, due
+from .schedule import EXPIRE, MISS, NOTHING, SEND, Action, after_send, due, is_recurring, rearm
 from .store import ACTIVE, MISSED, SenderLock, Snooze, Store, StoreError, Target
 
 logger = logging.getLogger(__name__)
@@ -167,7 +167,11 @@ class Timer:
                 text = echo.reminder_text(snooze, action.late_by)
             elif action.kind == MISS:
                 text = echo.missed_text(snooze)
-                snooze.state = MISSED
+                if is_recurring(snooze):
+                    next_at = rearm(snooze, now)
+                    text += f"\nNext: {echo.format_when(next_at, snooze.schedule.tz, now)}"
+                else:
+                    snooze.state = MISSED
             elif action.kind == EXPIRE:
                 text = not_started_message(snooze)
                 snooze.state = MISSED
@@ -196,7 +200,7 @@ class Timer:
             if result.error is not None:
                 snooze.last_error = result.error  # a failed reminder keeps its due time: the next tick retries it
                 continue
-            if result.message_id is not None:
+            if result.job.action.kind == SEND and result.message_id is not None:
                 snooze.last_message_id = result.message_id
             if result.job.action.kind != SEND:
                 snooze.last_error = None

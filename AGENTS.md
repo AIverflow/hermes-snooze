@@ -23,8 +23,8 @@ The repo root is the plugin folder.
 
 ## Docs
 
-All user-facing documentation lives in `README.md`. Code comments and docstrings explain the code, not the features: link to the README instead of repeating it.
+`README.md` is the short user-facing overview: what Snooze does, installation, first use, and limits. Put detailed user instructions in `docs/user-guide.md` and link to that guide from the README. Avoid repeating the same instructions across docs; code and schemas are the source of truth for technical behavior, while docs explain how people use the plugin. Code comments and docstrings explain implementation, not user features.
 
 ## Tests and lint
 
-Commands are in the README ("Development"). Tests and Ruff must pass before a commit; the Ruff rules are in `ruff.toml`.
+Test and lint commands are in `docs/user-guide.md` ("Development"). Tests and Ruff must pass before a commit; the Ruff rules are in `ruff.toml`.

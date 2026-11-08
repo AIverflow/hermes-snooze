@@ -22,12 +22,12 @@ def iso(dt):
     return dt.isoformat()
 
 
-def make(*, state=ACTIVE, every=10, until=T0 + timedelta(hours=1), next_at=T0, **kw):
+def make(*, state=ACTIVE, every=10, until=T0 + timedelta(hours=1), next_at=T0, schedule=None, **kw):
     return Snooze(
         text="Take the pill",
         created=iso(T0 - timedelta(hours=1)),
         target=Target(platform="telegram", chat_id="123"),
-        schedule=Schedule(first_at=iso(T0), every=every, until=iso(until) if until else None),
+        schedule=schedule or Schedule(first_at=iso(T0), every=every, until=iso(until) if until else None),
         state=state,
         next_at=iso(next_at),
         **kw,
@@ -87,7 +87,7 @@ class TickTest(TimerCase):
     def test_sends_a_due_reminder_and_schedules_the_next(self):
         sid = self.add()
         self.assertEqual(self.timer.tick(), 1)
-        self.assertEqual(self.sender.sent, [("telegram", "123", "🔔 Take the pill  (reply ok / later)")])
+        self.assertEqual(self.sender.sent, [("telegram", "123", "🔔 Snooze #1: Take the pill  (reply Ok / later)")])
         s = self.get(sid)
         self.assertEqual((s.state, s.sent_count, s.last_message_id), (ACTIVE, 1, "m1"))
         self.assertEqual(s.last_sent_at, iso(T0))
@@ -105,7 +105,7 @@ class TickTest(TimerCase):
         self.timer.tick()
         self.now = T0 + timedelta(minutes=10)
         self.timer.tick()
-        self.assertEqual(self.sender.sent[1][2], "🔔 Take the pill (2nd)")
+        self.assertEqual(self.sender.sent[1][2], "🔔 Snooze #1: Take the pill (2nd)")
 
     def test_late_reminder_says_how_late(self):
         self.add()
@@ -126,6 +126,41 @@ class TickTest(TimerCase):
         self.timer.tick()
         self.assertEqual(self.sender.sent, [("telegram", "123", "⌛ Missed: Take the pill (3 reminders, no answer)")])
         self.assertEqual(self.get(sid).state, MISSED)
+
+    def test_recurring_cap_sends_missed_text_and_rearms_for_next_day(self):
+        sid = self.add(
+            sent_count=3,
+            schedule=Schedule(
+                first_at=iso(T0),
+                every=10,
+                until=iso(T0 + timedelta(hours=2)),
+                tz="Europe/Paris",
+                days=list(range(7)),
+                span=120,
+            ),
+            next_at=T0,
+        )
+        self.timer.tick()
+        self.assertEqual(
+            self.sender.sent[0][2],
+            "⌛ Missed: Take the pill (3 reminders, no answer)\nNext: tomorrow 18:00",
+        )
+        s = self.get(sid)
+        self.assertEqual((s.state, s.sent_count, s.next_at), (ACTIVE, 0, iso(T0 + timedelta(days=1))))
+
+    def test_expired_pending_recurring_snooze_does_not_rearm(self):
+        sid = self.add(
+            state=PENDING,
+            schedule=Schedule(first_at=iso(T0), every=10, tz="Europe/Paris", days=list(range(7)), span=120),
+        )
+        self.now = T0 + timedelta(hours=2)
+        self.timer.tick()
+        self.assertEqual(self.get(sid).state, MISSED)
+
+    def test_miss_message_id_does_not_replace_last_reminder_id(self):
+        sid = self.add(sent_count=3, last_message_id="last-reminder")
+        self.timer.tick()
+        self.assertEqual(self.get(sid).last_message_id, "last-reminder")
 
     def test_until_ends_the_snooze(self):
         sid = self.add(until=T0, sent_count=1)

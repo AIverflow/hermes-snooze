@@ -3,7 +3,7 @@
 Hermes glue: nothing from Hermes is imported at the top of this file. Hermes
 modules are imported inside the small helpers that need them, so the module
 loads (and the tests run) without Hermes, using a fake `ctx`. The commands and
-settings are documented in the README.
+settings are documented in `docs/user-guide.md` ("Setup and configuration").
 
 Stored shapes (see `store.py`): `schedule.every` is the repeat interval in
 MINUTES (a number, which is what `confirm.py` reads); `confirm` is a dict
@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import echo
 from . import parse as _parse
 from .parse import ConfirmRule, ParseError, Spec
-from .schedule import PENDING_TIMEOUT, apply_later, is_pending_expired, pending_deadline
+from .schedule import PENDING_TIMEOUT, apply_later, is_pending_expired, is_recurring, pending_deadline, rearm
 from .store import ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, Store, StoreError, Target, Txn
 
 PLUGIN_NAME = "snooze"
@@ -80,7 +80,7 @@ USAGE = {
 
 HELP = (
     "Usage: /snooze <what> [at <time> | in <duration>] [every <duration>] [until <time>] "
-    "[ok <word>] [then <action>]\n"
+    "[daily | weekdays | on <days>] [ok <word>] [then <action>]\n"
     f"Example: {_parse.EXAMPLE_FULL}\n"
     "Other commands: list, ok [id], later [minutes] [id], cancel <id>, yes [id], test"
 )
@@ -104,6 +104,7 @@ class Settings:
     cap_minutes: int = DEFAULT_CAP_MINUTES
     cap_reminders: int = DEFAULT_CAP_REMINDERS
     timezone: str = "UTC"  # an IANA name; "system" is already resolved
+    notification_platform: str = "source"
 
 
 def _is_positive_int(value: Any) -> bool:
@@ -117,11 +118,20 @@ def read_settings(ctx: Any) -> Settings:
         value = ctx.get_config(key, default)
         return value if is_valid(value) else default
 
+    notification_platform = ctx.get_config("notification_platform", "source")
+    if not isinstance(notification_platform, str) or notification_platform.lower() not in {
+        "source",
+        "telegram",
+        "discord",
+    }:
+        notification_platform = "source"
+
     return Settings(
         validate_setup=get("validate_setup", DEFAULT_VALIDATE_SETUP, lambda v: isinstance(v, bool)),
         cap_minutes=get("cap_minutes", DEFAULT_CAP_MINUTES, _is_positive_int),
         cap_reminders=get("cap_reminders", DEFAULT_CAP_REMINDERS, _is_positive_int),
         timezone=resolve_timezone(ctx.get_config("timezone", "system")),
+        notification_platform=notification_platform.lower(),
     )
 
 
@@ -158,14 +168,23 @@ def not_started_message(snooze: Snooze) -> str:
 # Each takes a record inside a store transaction, changes it, and returns the reply text.
 
 
-def confirm_snooze(snooze: Snooze) -> str:
-    """The user confirmed a running snooze: it is done."""
+def confirm_snooze(snooze: Snooze, now: datetime, answer: str | None = None) -> str:
+    """The user confirmed a running snooze: finish its occurrence or re-arm its series."""
+    snooze.answer = answer
+    choice = isinstance(snooze.confirm, dict) and snooze.confirm.get("kind") == "choice"
+    answer_text = f" → {answer}" if answer and choice else ""
+    if is_recurring(snooze):
+        next_at = rearm(snooze, now)
+        when = echo.format_when(next_at, snooze.schedule.tz, now)
+        if snooze.then:
+            return f"✅ Done for today: {snooze.text}{answer_text}. Now: {snooze.then}… Next: {when}"
+        return f"✅ Done for today: {snooze.text}{answer_text}. Next: {when}"
     snooze.state, snooze.next_at = DONE, None
     if snooze.test:
         return echo.TEST_PASSED
     if snooze.then:
-        return f"✅ Done: {snooze.text}. Now: {snooze.then}…"
-    return f"✅ Done: {snooze.text}"
+        return f"✅ Done: {snooze.text}{answer_text}. Now: {snooze.then}…"
+    return f"✅ Done: {snooze.text}{answer_text}"
 
 
 def push_back_snooze(snooze: Snooze, now: datetime, minutes: float) -> str:
@@ -295,15 +314,18 @@ def hermes_gateway_running() -> bool | None:
     return bool(liveness.running)
 
 
-def hermes_home_target() -> Target | None:
-    """The first home channel set in the profile, or None."""
+def hermes_home_target(platform: str | None = None) -> Target | None:
+    """The requested platform's home channel, or the first configured chat home."""
+    selected_platform = platform.lower() if platform else None
     try:
         from gateway.config import load_gateway_config
 
         config = load_gateway_config()
-        for platform, platform_config in config.platforms.items():
+        for candidate, platform_config in config.platforms.items():
             home = getattr(platform_config, "home_channel", None)
-            name = str(getattr(platform, "value", platform)).lower()
+            name = str(getattr(candidate, "value", candidate)).lower()
+            if selected_platform is not None and name != selected_platform:
+                continue
             if home is None or name in NON_CHAT_PLATFORMS:
                 continue
             chat_id = str(home.chat_id)
@@ -344,7 +366,7 @@ class Commands:
         *,
         data_dir: Callable[[], str | os.PathLike] = hermes_data_dir,
         now: Callable[[], datetime] = _utcnow,
-        home_target: Callable[[], Target | None] = hermes_home_target,
+        home_target: Callable[..., Target | None] = hermes_home_target,
         session_env: Callable[[str], str] = hermes_session_env,
         is_paused: Callable[[], bool] = hermes_paused,
         run_then: Callable[[Snooze, Any], None] | None = None,
@@ -412,18 +434,34 @@ class Commands:
     # -- create ----------------------------------------------------------------
 
     def _command_target(self, source: Any) -> tuple[Target | None, str]:
+        platform = read_settings(self._ctx).notification_platform
+        if platform != "source":
+            return self._home_target(platform), WHERE_HOME
         target = target_from_source(source)
         if target is not None:
             return target, WHERE_CHAT
         return self._home_target(), WHERE_HOME
 
     def _tool_target(self) -> tuple[Target | None, str]:
+        platform = read_settings(self._ctx).notification_platform
+        if platform != "source":
+            return self._home_target(platform), WHERE_HOME
         platform = self._session_env("HERMES_SESSION_PLATFORM").strip().lower()
         chat_id = self._session_env("HERMES_SESSION_CHAT_ID").strip()
         if platform not in NON_CHAT_PLATFORMS and chat_id:
             user_id = self._session_env("HERMES_SESSION_USER_ID").strip()
             return Target(platform=platform, chat_id=chat_id, user_id=user_id or None), WHERE_CHAT
         return self._home_target(), WHERE_HOME
+
+    def _no_target_text(self) -> str:
+        platform = read_settings(self._ctx).notification_platform
+        if platform != "source":
+            name = platform.title()
+            return (
+                f"No {name} home channel is configured for this profile. "
+                f"Set one with /sethome on {name} or choose another notification_platform. Nothing was set."
+            )
+        return NO_TARGET_TEXT
 
     def _add(self, spec: Spec, target: Target, *, test: bool = False) -> tuple[Snooze, bool, Settings, datetime]:
         """Store a new snooze for `spec`. Returns (record, whether its stop time is the cap, settings, now).
@@ -444,6 +482,8 @@ class Commands:
                 every=echo.minutes_value(spec.every or DEFAULT_EVERY),
                 until=_iso(until),
                 tz=spec.tz,
+                days=sorted(spec.days) if spec.days else None,
+                span=echo.minutes_value(until - spec.first_at) if spec.days else None,
             ),
             confirm={"kind": spec.confirm.kind, "value": spec.confirm.value},
             then=_no_media_tag(spec.then),
@@ -455,7 +495,7 @@ class Commands:
 
     def _create_from_spec(self, spec: Spec, target: Target | None, where: str) -> str:
         if target is None:
-            return NO_TARGET_TEXT
+            return self._no_target_text()
         record, capped, settings, now = self._add(spec, target)
         return self._echo(record, now, where, capped, settings)
 
@@ -517,7 +557,7 @@ class Commands:
 
         target, where = self._tool_target()
         if target is None:
-            return {"error": NO_TARGET_TEXT}
+            return {"error": self._no_target_text()}
 
         spec = Spec(
             text=text, first_at=first_at, every=every, until=until, confirm=rule, then=then, tz=settings.timezone
@@ -591,6 +631,8 @@ class Commands:
             else:
                 nxt = echo.from_iso(s.next_at)
                 detail = f"next {echo.format_when(nxt, zone, now)}" if nxt else "no next reminder"
+                if is_recurring(s):
+                    detail = f"{echo.days_text(s.schedule.days)}, {detail}"
                 detail += f", {s.sent_count} sent"
             if s.last_error:
                 detail += f" (last error: {s.last_error})"
@@ -601,14 +643,14 @@ class Commands:
         return None  # `/snooze test` alone is handled by `_test`; with words after it, it is a reminder
 
     def _test(self, source: Any) -> str:
-        """`/snooze test`: one reminder now, to confirm with `ok` within `TEST_WINDOW`. See the README.
+        """`/snooze test`: one reminder now, to confirm with `ok` within `TEST_WINDOW`. See `docs/user-guide.md`.
 
         The command cannot wait for the reply, so it reports the check it can do now. With no gateway
         nothing would be sent, so no test is made.
         """
         target, where = self._command_target(source)
         if target is None:
-            return NO_TARGET_TEXT
+            return self._no_target_text()
         running = self._gateway_running()
         if running is False:
             return echo.TEST_GATEWAY_OFF
@@ -635,7 +677,11 @@ class Commands:
             s, problem = self._select(txn, sid, ACTIVE)
             if problem:
                 return problem
-            reply = confirm_snooze(s)
+            if isinstance(s.confirm, dict) and s.confirm.get("kind") == "choice":
+                options = [option.strip() for option in str(s.confirm.get("value", "")).split("|") if option.strip()]
+                choices = ", ".join(f"{index} {option}" for index, option in enumerate(options, 1))
+                return f"#{s.id} needs an answer: reply {choices} in the chat."
+            reply = confirm_snooze(s, self._now())
             if s.then:
                 confirmed.append(dataclasses.replace(s))
             return reply
@@ -644,7 +690,9 @@ class Commands:
         if not confirmed:
             return reply
         if self._run_then is None or target_from_source(source) is None:
-            # No chat to run the agent turn in (CLI / Desktop): see README, "The then action".
+            # No chat to run the agent turn in (CLI / Desktop): see `docs/user-guide.md` ("Follow-up actions").
+            if is_recurring(confirmed[0]):
+                return f"{reply}\n{THEN_NOT_RUN_TEXT}"
             return f"✅ Done: {confirmed[0].text}\n{THEN_NOT_RUN_TEXT}"
         self._run_then(confirmed[0], source)
         return reply
@@ -806,7 +854,10 @@ def register_all(ctx: Any, run_then: Callable[[Snooze, Any], None] | None = None
         "snooze",
         handlers.command,
         description="A reminder that repeats until you confirm it: /snooze <what> at <time> every <duration>",
-        args_hint="<what> [at <time> | in <duration>] [every <duration>] | list | ok | later | cancel | yes | test",
+        args_hint=(
+            "<what> [at <time> | in <duration>] [every <duration>] [daily | weekdays | on <days>] "
+            "| list | ok | later | cancel | yes | test"
+        ),
     )
     ctx.register_tool(
         name=TOOL_NAME,

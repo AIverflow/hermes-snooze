@@ -98,7 +98,7 @@ class CreateTest(Base):
             "every 10 min",
             "stops 18:00",
             "(Europe/Paris)",
-            'reply "ok"',
+            'reply "Ok"',
             'the agent will "close ticket 42"',
             "Telegram (this chat)",
             "/snooze cancel 1",
@@ -109,6 +109,13 @@ class CreateTest(Base):
         s = self.create(self.FULL)
         self.assertEqual(s.state, ACTIVE)
         self.assertEqual(s.next_at, s.schedule.first_at)
+
+    def test_recurring_creation_stores_days_and_span_and_summarizes_it(self):
+        reply = self.run_cmd("Take my pill at 8am daily", source=telegram_source())
+        s = self.store.load()[0]
+        self.assertEqual(s.schedule.days, list(range(7)))
+        self.assertEqual(s.schedule.span, 120)
+        self.assertIn("daily at 8:00", reply)
 
     def test_started_echo_has_no_yes_line_and_ends_with_undo(self):
         echo = self.run_cmd(self.FULL, source=telegram_source())
@@ -183,6 +190,10 @@ class ValidateSetupOnTest(Base):
                 echo = self.run_cmd(f"Do it in 30m every 5m {suffix}", source=telegram_source())
                 self.assertIn(expected, echo)
 
+    def test_choice_echo_lists_answer_options(self):
+        echo = self.run_cmd("Dinner? in 30m ok asian|french|italian", source=telegram_source())
+        self.assertIn("reply with one of: 1 asian, 2 french, 3 italian", echo)
+
     def test_parse_error_sets_nothing(self):
         reply = self.run_cmd("Wake up", source=telegram_source())
         self.assertIn("Missing when to start", reply)
@@ -217,6 +228,20 @@ class ValidateSetupOffTest(Base):
         self.assertNotIn("`yes`", echo)
         self.assertIn("Snooze #1 set", echo)
         self.assertIn("Undo:     /snooze cancel 1", echo)
+
+
+class OkCommandTest(Base):
+    def test_choice_requires_answer_in_chat_and_stays_active(self):
+        snooze = self.add(confirm={"kind": "choice", "value": "asian|french|italian"})
+        reply = self.run_cmd(f"ok {snooze.id}")
+        self.assertEqual(reply, f"#{snooze.id} needs an answer: reply 1 asian, 2 french, 3 italian in the chat.")
+        self.assertEqual(self.store.get(snooze.id).state, ACTIVE)
+        self.assertIsNone(self.store.get(snooze.id).answer)
+
+    def test_plain_snooze_still_confirms(self):
+        snooze = self.add()
+        self.assertEqual(self.run_cmd(f"ok {snooze.id}"), "✅ Done: Wake up")
+        self.assertEqual(self.store.get(snooze.id).state, DONE)
 
 
 class TargetTest(Base):
@@ -329,6 +354,20 @@ class ListTest(Base):
         self.add(last_error="chat not found", next_at=NOW.isoformat())
         self.assertIn("last error: chat not found", self.run_cmd("list"))
 
+    def test_recurring_item_shows_days_and_next_occurrence(self):
+        self.add(
+            text="Pill A",
+            schedule=Schedule(
+                first_at="2026-11-07T07:00:00+00:00",
+                every=10,
+                tz="Europe/Paris",
+                days=list(range(7)),
+                span=120,
+            ),
+            next_at="2026-11-08T07:00:00+00:00",
+        )
+        self.assertIn("#1 Pill A — daily, next tomorrow 08:00, 0 sent", self.run_cmd("list"))
+
     def test_paused_is_the_first_line(self):
         self.paused = True
         self.add(next_at=(NOW + timedelta(minutes=5)).isoformat())
@@ -349,6 +388,28 @@ class OkTest(Base):
         self.assertEqual(self.run_cmd("ok"), "✅ Done: Wake up")
         s = self.store.load()[0]
         self.assertEqual((s.state, s.next_at), (DONE, None))
+
+    def test_ok_rearms_recurring_snooze_for_tomorrow_and_resets_count(self):
+        self.add(
+            schedule=Schedule(
+                first_at="2026-11-07T07:00:00+00:00",
+                every=10,
+                until="2026-11-07T09:00:00+00:00",
+                tz="Europe/Paris",
+                days=list(range(7)),
+                span=120,
+            ),
+            next_at=NOW.isoformat(),
+            sent_count=3,
+        )
+        self.assertEqual(self.run_cmd("ok"), "✅ Done for today: Wake up. Next: tomorrow 08:00")
+        s = self.store.load()[0]
+        self.assertEqual((s.state, s.next_at, s.sent_count), (ACTIVE, "2026-11-08T07:00:00+00:00", 0))
+
+    def test_cancel_ends_a_recurring_series(self):
+        s = self.add(schedule=Schedule(first_at=NOW.isoformat(), days=list(range(7)), span=120))
+        self.assertIn("Cancelled", self.run_cmd(f"cancel {s.id}"))
+        self.assertEqual(self.store.get(s.id).state, CANCELLED)
 
     def test_ok_with_id(self):
         self.add(text="One")
@@ -378,6 +439,22 @@ class OkTest(Base):
         self.assertEqual(calls, [])
         self.assertEqual(reply, f"✅ Done: Wake up\n{commands.THEN_NOT_RUN_TEXT}")
         self.assertEqual(self.store.load()[0].state, DONE)
+
+    def test_recurring_then_from_the_cli_keeps_the_next_occurrence_in_the_reply(self):
+        self.add(
+            then="close ticket 42",
+            schedule=Schedule(
+                first_at="2026-11-07T07:00:00+00:00",
+                every=10,
+                tz="Europe/Paris",
+                days=list(range(7)),
+                span=120,
+            ),
+            next_at=NOW.isoformat(),
+        )
+        reply = self.run_cmd("ok")
+        self.assertIn("✅ Done for today: Wake up. Now: close ticket 42… Next: tomorrow 08:00", reply)
+        self.assertTrue(reply.endswith(commands.THEN_NOT_RUN_TEXT))
 
     def test_ok_without_then_never_calls_the_runner(self):
         self.add(next_at=NOW.isoformat())
@@ -553,7 +630,7 @@ class SnoozeTestCommandTest(Base):
         self.assertEqual(s.confirm, {"kind": "ok", "value": ""})
         self.assertIn("✅ Gateway running for this profile", reply)
         self.assertIn("next 15 s", reply)
-        self.assertIn("reply `ok`", reply)
+        self.assertIn("reply `Ok`", reply)
 
     def test_tick_constant_matches_the_text(self):
         from snooze import send
@@ -816,6 +893,12 @@ class SettingsTest(unittest.TestCase):
             (False, 30, 3, "Asia/Tokyo"),
         )
 
+    def test_notification_platform_is_read_and_validated(self):
+        discord = commands.read_settings(FakeCtx(notification_platform="Discord"))
+        invalid = commands.read_settings(FakeCtx(notification_platform="matrix"))
+        self.assertEqual(discord.notification_platform, "discord")
+        self.assertEqual(invalid.notification_platform, "source")
+
     def test_invalid_values_fall_back(self):
         ctx = FakeCtx(validate_setup="maybe", cap_minutes=-5, cap_reminders="lots", timezone="Mars/Base")
         settings = commands.read_settings(ctx)
@@ -829,6 +912,50 @@ class SettingsTest(unittest.TestCase):
         cmds = Commands(ctx, data_dir=lambda: tmp.name, now=lambda: NOW, home_target=lambda: HOME)
         echo = cmds.command("Wake up at 4pm every 10m", source=telegram_source())
         self.assertIn("stops 16:30 or after 3 reminders", echo)
+
+    def test_discord_setting_routes_chat_command_to_discord_home(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        discord_home = Target("discord", "channel-1", "user-1")
+        ctx = FakeCtx(notification_platform="discord")
+        home_target = mock.Mock(return_value=discord_home)
+        cmds = Commands(ctx, data_dir=lambda: tmp.name, now=lambda: NOW, home_target=home_target)
+
+        cmds.command("Wake up in 10m", source=telegram_source())
+
+        self.assertEqual(Store(tmp.name).load()[0].target, discord_home)
+        home_target.assert_called_once_with("discord")
+
+    def test_discord_setting_routes_tool_created_snooze_to_discord_home(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        discord_home = Target("discord", "channel-1", "user-1")
+        home_target = mock.Mock(return_value=discord_home)
+        cmds = Commands(
+            FakeCtx(notification_platform="discord"),
+            data_dir=lambda: tmp.name,
+            now=lambda: NOW,
+            home_target=home_target,
+        )
+
+        result = json.loads(cmds.tool({"text": "Wake up", "first_at": "2026-11-07T10:10:00Z"}))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(Store(tmp.name).load()[0].target, discord_home)
+        home_target.assert_called_once_with("discord")
+
+    def test_selected_platform_without_home_channel_does_not_create_snooze(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cmds = Commands(
+            FakeCtx(notification_platform="discord"),
+            data_dir=lambda: tmp.name,
+            now=lambda: NOW,
+            home_target=mock.Mock(return_value=None),
+        )
+
+        self.assertIn("No Discord home channel is configured", cmds.command("Wake up in 10m", source=telegram_source()))
+        self.assertEqual(Store(tmp.name).load(), [])
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Snooze store: one JSON file per profile, guarded by a file lock.
 
 Pure module: standard library only, no Hermes import. The caller passes the
-data directory. The files are listed in the README ("Snooze life cycle").
+data directory. See `docs/user-guide.md` ("Lifecycle and stored data").
 
 Timestamps are ISO 8601 strings in UTC. The store does not interpret them;
 `schedule.py` does. The fields `every`, `confirm` and `then` are plain JSON
@@ -56,6 +56,8 @@ class Schedule:
     every: Any = None
     until: str | None = None
     tz: str = "UTC"
+    days: list[int] | None = None
+    span: float | None = None
 
 
 @dataclass(kw_only=True)
@@ -75,7 +77,8 @@ class Snooze:
     next_at: str | None = None
     last_message_id: Any = None
     last_error: str | None = None
-    test: bool = False  # made by `/snooze test`: its texts differ (see README)
+    test: bool = False  # made by `/snooze test`; its texts differ from regular reminders
+    answer: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

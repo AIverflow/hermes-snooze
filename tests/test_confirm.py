@@ -49,6 +49,7 @@ class DefaultOk(unittest.TestCase):
     def test_plain_ok(self):
         d = run("ok")
         self.assertEqual(d, Decision("confirm", 1, None, False))
+        self.assertIsNone(d.answer)
 
     def test_case_spaces_punctuation(self):
         for text in ["OK", "Ok", " ok ", "ok!", "OK!!!", "ok.", "¡ok!", "(ok)"]:
@@ -108,6 +109,34 @@ class ContainsRule(unittest.TestCase):
     def test_contains_dict(self):
         s = [snooze(confirm_rule={"kind": "contains", "value": "sent"})]
         self.assertEqual(run("it was sent yesterday", s).action, "confirm")
+        self.assertEqual(run("  It was SENT yesterday!  ", s).answer, "It was SENT yesterday!")
+
+
+class ChoiceRule(unittest.TestCase):
+    def setUp(self):
+        self.snoozes = [snooze(confirm_rule="asian|french|italian")]
+
+    def test_number_and_option(self):
+        self.assertEqual(run("2", self.snoozes).answer, "french")
+        self.assertEqual(run("French", self.snoozes).answer, "french")
+        self.assertEqual(run("french!", self.snoozes).answer, "french")
+
+    def test_number_with_follow_up_passes_through(self):
+        decision = run("2 and book a table", self.snoozes)
+        self.assertEqual((decision.action, decision.answer, decision.pass_through), ("confirm", "french", True))
+
+    def test_unlisted_number_or_text_does_not_match(self):
+        self.assertEqual(run("4", self.snoozes).action, "none")
+        self.assertEqual(run("pizza", self.snoozes).action, "none")
+
+    def test_later_precedes_choice(self):
+        self.assertEqual(run("later", self.snoozes).action, "later")
+        later_option = [snooze(confirm_rule="later|french")]
+        self.assertEqual(run("later", later_option).action, "later")
+
+    def test_choice_does_not_match_reaction(self):
+        dm = Sender(platform="telegram", chat_id="100", user_id=None, chat_type="private")
+        self.assertEqual(run("french", self.snoozes, sender=dm, is_reaction=True).action, "none")
 
 
 class AnyRule(unittest.TestCase):
@@ -117,6 +146,7 @@ class AnyRule(unittest.TestCase):
             with self.subTest(text=text):
                 d = run(text, s)
                 self.assertEqual((d.action, d.pass_through), ("confirm", False))
+        self.assertEqual(run("  three glasses  ", s).answer, "three glasses")
 
     def test_any_empty_message(self):
         self.assertEqual(run("   ", [snooze(confirm_rule="any")]).action, "none")

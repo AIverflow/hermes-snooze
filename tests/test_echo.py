@@ -25,10 +25,16 @@ class FormatTest(unittest.TestCase):
         late = datetime(2026, 11, 7, 23, 30, tzinfo=timezone.utc)  # 00:30 on the 8th in Paris
         self.assertEqual(echo.format_when(late, "Europe/Paris", NOW), "tomorrow 00:30")
 
+    def test_days_text(self):
+        self.assertEqual(echo.days_text(range(7)), "daily")
+        self.assertEqual(echo.days_text(range(5)), "weekdays")
+        self.assertEqual(echo.days_text([0, 3]), "Mon, Thu")
+
 
 class ReminderTextTest(unittest.TestCase):
     def snooze(self, sent_count=0):
         return Snooze(
+            id=14,
             text="Stretch",
             created=NOW.isoformat(),
             target=Target("telegram", "1", "1"),
@@ -37,19 +43,33 @@ class ReminderTextTest(unittest.TestCase):
         )
 
     def test_first_reminder_says_how_to_answer(self):
-        self.assertEqual(echo.reminder_text(self.snooze()), "🔔 Stretch  (reply ok / later)")
+        self.assertEqual(echo.reminder_text(self.snooze()), "🔔 Snooze #14: Stretch  (reply Ok / later)")
 
     def test_next_reminders_are_numbered(self):
         for sent, label in ((1, "2nd"), (2, "3rd"), (3, "4th"), (10, "11th"), (11, "12th"), (12, "13th"), (20, "21st")):
             with self.subTest(sent=sent):
-                self.assertEqual(echo.reminder_text(self.snooze(sent)), f"🔔 Stretch ({label})")
+                self.assertEqual(echo.reminder_text(self.snooze(sent)), f"🔔 Snooze #14: Stretch ({label})")
 
     def test_late_reminder_adds_a_line(self):
         text = echo.reminder_text(self.snooze(1), timedelta(minutes=40))
-        self.assertEqual(text, "🔔 Stretch (2nd)\n⏰ late by 40 min")
+        self.assertEqual(text, "🔔 Snooze #14: Stretch (2nd)\n⏰ late by 40 min")
 
     def test_late_by_hours(self):
         self.assertIn("⏰ late by 3 h", echo.reminder_text(self.snooze(), timedelta(hours=3, seconds=20)))
+
+    def test_choice_reminders_show_numbered_options(self):
+        snooze = self.snooze()
+        snooze.text = "Dinner?"
+        snooze.confirm = {"kind": "choice", "value": "asian|french|italian"}
+        self.assertEqual(
+            echo.reminder_text(snooze),
+            "🔔 Snooze #14: Dinner?  (reply 1-3 / later)\n1 asian · 2 french · 3 italian",
+        )
+        snooze.sent_count = 1
+        self.assertEqual(
+            echo.reminder_text(snooze),
+            "🔔 Snooze #14: Dinner? (2nd)\n1 asian · 2 french · 3 italian",
+        )
 
     def test_missed_text(self):
         self.assertEqual(echo.missed_text(self.snooze(3)), "⌛ Missed: Stretch (3 reminders, no answer)")
@@ -79,6 +99,20 @@ class GatewayWarningTest(unittest.TestCase):
 
     def test_no_warning_by_default(self):
         self.assertNotIn("gateway", self.render())
+
+    def test_choice_stop_text_lists_numbered_options(self):
+        sn = Snooze(
+            id=1,
+            text="Dinner?",
+            created=NOW.isoformat(),
+            target=Target("telegram", "1", "1"),
+            schedule=Schedule(first_at=NOW.isoformat()),
+            confirm={"kind": "choice", "value": "asian|french|italian"},
+        )
+        text = echo.render_echo(sn, NOW, "this chat", False, 10, timedelta(minutes=10))
+        self.assertIn("Stop it:  reply with one of: 1 asian, 2 french, 3 italian", text)
+        self.assertIn("Answer in chat: reply with an option", text)
+        self.assertNotIn("/snooze ok 1", text)
 
 
 class StartStateTest(unittest.TestCase):

@@ -2,7 +2,7 @@
 
 Pure module: standard library, `store` and `echo` only. It decides; the timer
 (`send.py`) does the sending. Times are aware UTC; `schedule.every` is in
-minutes, as stored. The life cycle is in the README ("Snooze life cycle").
+minutes, as stored. See `docs/user-guide.md` ("Lifecycle and stored data").
 """
 
 from __future__ import annotations
@@ -10,8 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from . import echo
+from .parse import next_on_days
 from .store import ACTIVE, PENDING, Snooze
 
 PENDING_TIMEOUT = timedelta(minutes=10)  # time the user has to reply `yes`
@@ -30,6 +32,48 @@ class Action:
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
+
+
+def is_recurring(snooze: Snooze) -> bool:
+    """Whether this snooze has at least one recurrence day."""
+    return bool(snooze.schedule.days)
+
+
+def rearm(snooze: Snooze, now: datetime) -> datetime:
+    """Start the next occurrence of a recurring snooze and reset its reminder state."""
+    if not is_recurring(snooze):
+        raise ValueError("cannot re-arm a one-time snooze")
+
+    old_first = echo.from_iso(snooze.schedule.first_at)
+    if old_first is None:
+        raise ValueError("recurring snooze has an invalid first_at")
+    zone = ZoneInfo(snooze.schedule.tz)
+    local_first = old_first.astimezone(zone)
+    after = max(now, old_first)
+    new_first = next_on_days(
+        local_first.timetz().replace(tzinfo=None),
+        after,
+        zone,
+        frozenset(snooze.schedule.days),
+    )
+
+    old_until = echo.from_iso(snooze.schedule.until)
+    if snooze.schedule.span is not None:
+        span = timedelta(minutes=snooze.schedule.span)
+    elif old_until is not None:
+        span = old_until - old_first
+    else:
+        span = None
+
+    snooze.schedule.first_at = _iso(new_first)
+    snooze.schedule.until = _iso(new_first + span) if span is not None else None
+    snooze.next_at = _iso(new_first)
+    snooze.state = ACTIVE
+    snooze.sent_count = 0
+    snooze.last_sent_at = None
+    snooze.last_message_id = None
+    snooze.last_error = None
+    return new_first
 
 
 # -- pending snoozes: the `yes` window -----------------------------------------

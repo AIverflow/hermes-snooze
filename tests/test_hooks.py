@@ -159,6 +159,26 @@ class ThenTest(Base):
         self.assertEqual(self.sent(), [("123", "✅ Done: Wake up. Now: start the coffee machine…")])
         self.assertEqual(self.inject.calls, [])  # no injection: needs no allow_gateway_injection
 
+    async def test_recurring_text_confirm_rearms_and_keeps_then_rewrite(self):
+        s = self.with_then(
+            schedule=Schedule(
+                first_at="2026-11-07T08:00:00+00:00",
+                every=10,
+                tz="Europe/Paris",
+                days=list(range(7)),
+                span=120,
+            ),
+            next_at=NOW.isoformat(),
+        )
+        result = await self.dispatch(event("ok"))
+        stored = self.stored(s)
+        self.assertEqual(result, {"action": "rewrite", "text": self.PROMPT})
+        self.assertEqual((stored.state, stored.sent_count, stored.then, stored.text), (ACTIVE, 0, s.then, s.text))
+        self.assertEqual(
+            self.sent(),
+            [("123", "✅ Done for today: Wake up. Now: start the coffee machine… Next: tomorrow 09:00")],
+        )
+
     async def test_confirm_with_extra_text_rewrites_and_keeps_what_the_user_wrote(self):
         self.with_then()
         result = await self.dispatch(event("ok, and book a table"))
@@ -276,6 +296,52 @@ class DispatchTest(Base):
         self.assertIsNone(result)
         self.assertEqual(self.stored(s).state, DONE)
         self.assertEqual(self.sent(), [("123", "✅ Done: Wake up")])
+
+    async def test_choice_answer_is_saved_replied_and_given_to_then_action(self):
+        s = self.add(
+            text="Dinner?",
+            then="order it",
+            confirm={"kind": "choice", "value": "asian|french|italian"},
+        )
+        result = await self.dispatch(event("2"))
+        stored = self.stored(s)
+        self.assertEqual(stored.state, DONE)
+        self.assertEqual(stored.answer, "french")
+        self.assertIn("→ french", self.sent()[0][1])
+        self.assertEqual(
+            result,
+            {
+                "action": "rewrite",
+                "text": "The user confirmed the reminder 'Dinner?' with the answer 'french'. "
+                "Now do this: order it. Then tell the user the result in one line.",
+            },
+        )
+
+    async def test_recurring_choice_reply_keeps_answer_and_adds_it_to_done_reply(self):
+        s = self.add(
+            text="Dinner?",
+            then="order it",
+            confirm={"kind": "choice", "value": "asian|french|italian"},
+            schedule=Schedule(
+                first_at="2026-11-07T08:00:00+00:00",
+                every=10,
+                tz="Europe/Paris",
+                days=list(range(7)),
+                span=120,
+            ),
+        )
+        await self.dispatch(event("2"))
+        stored = self.stored(s)
+        self.assertEqual((stored.state, stored.answer), (ACTIVE, "french"))
+        self.assertIn("→ french", self.sent()[0][1])
+
+    async def test_nonmatching_choice_passes_through_and_keeps_reminding(self):
+        s = self.add(confirm={"kind": "choice", "value": "asian|french|italian"})
+        result = await self.dispatch(event("pizza"))
+        self.assertIsNone(result)
+        self.assertEqual(self.stored(s).state, ACTIVE)
+        self.assertIsNone(self.stored(s).answer)
+        self.assertEqual(self.sent(), [])
 
     async def test_later_pushes_back_and_is_skipped(self):
         s = self.add()

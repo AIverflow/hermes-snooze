@@ -10,7 +10,7 @@ from .store import PENDING, Snooze
 
 PLATFORM_LABELS = {"whatsapp": "WhatsApp", "whatsapp_cloud": "WhatsApp Cloud", "sms": "SMS"}
 
-# `/snooze test`: a snooze flagged `test` (see README, "Commands").
+# `/snooze test`: a snooze flagged `test` (see `docs/user-guide.md`, "Commands").
 TEST_TEXT = "🧪 Snooze test"
 TEST_WINDOW = timedelta(minutes=2)  # time the user has to reply
 TEST_ARRIVES_IN = 15  # seconds; the timer's tick (`send.TICK_SECONDS`)
@@ -85,6 +85,17 @@ def format_when(moment: datetime, zone_name: str, now: datetime, relative_to: da
     return f"{local:%a} {local.day} {local:%b} {clock}"
 
 
+def days_text(days: Any) -> str:
+    """Render weekday numbers as a short recurrence label."""
+    day_set = set(days or ())
+    if day_set == set(range(7)):
+        return "daily"
+    if day_set == set(range(5)):
+        return "weekdays"
+    names = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    return ", ".join(names[day] for day in range(7) if day in day_set)
+
+
 def platform_label(platform: str) -> str:
     return PLATFORM_LABELS.get(platform.lower(), platform.title())
 
@@ -92,6 +103,9 @@ def platform_label(platform: str) -> str:
 def _stop_text(rule: Any) -> str:
     kind = rule.get("kind") if isinstance(rule, dict) else None
     value = rule.get("value", "") if isinstance(rule, dict) else ""
+    if kind == "choice":
+        options = [option.strip() for option in str(value).split("|") if option.strip()]
+        return "reply with one of: " + ", ".join(f"{index} {option}" for index, option in enumerate(options, 1))
     if kind == "word":
         return f'reply "{value}"'
     if kind == "contains":
@@ -100,7 +114,7 @@ def _stop_text(rule: Any) -> str:
         return "reply with any message"
     if kind == "emoji":
         return f"send {value} (a message or a reaction)"
-    return 'reply "ok"'
+    return 'reply "Ok"'
 
 
 def render_echo(
@@ -124,7 +138,11 @@ def render_echo(
     zone = sched.tz
     pending = snooze.state == PENDING
 
-    when = [format_when(first, zone, now)] if first else []
+    if first and sched.days:
+        local_time = first.astimezone(zone_of(zone)).strftime("%H:%M").lstrip("0")
+        when = [f"{days_text(sched.days)} at {local_time}", f"next {format_when(first, zone, now)}"]
+    else:
+        when = [format_when(first, zone, now)] if first else []
     if sched.every:
         when.append(f"every {format_minutes(sched.every)}")
     if until:
@@ -142,6 +160,10 @@ def render_echo(
     if snooze.then:
         lines.append(f'Then:     the agent will "{snooze.then}" and tell you the result')
     lines.append(f"Where:    {platform_label(snooze.target.platform)} ({where})")
+    if isinstance(snooze.confirm, dict) and snooze.confirm.get("kind") == "choice":
+        lines.append("Answer in chat: reply with an option")
+    else:
+        lines.append(f'If "Ok" does not match: /snooze ok {snooze.id}')
     lines.append(f"Undo:     /snooze cancel {snooze.id}")
     if pending:
         minutes = format_minutes(minutes_value(yes_window))
@@ -168,7 +190,7 @@ def test_started_text(snooze: Snooze, where: str, gateway_running: bool | None) 
             f"🧪 Snooze test #{snooze.id}",
             check,
             f"A test reminder will arrive in the next {TEST_ARRIVES_IN} s "
-            f"({platform_label(snooze.target.platform)}, {where}): reply `ok`.",
+            f"({platform_label(snooze.target.platform)}, {where}): reply `Ok`.",
             f"No reply within {format_minutes(minutes_value(TEST_WINDOW))}: the test fails.",
         ]
     )
@@ -181,12 +203,16 @@ def _ordinal(n: int) -> str:
 
 
 def reminder_text(snooze: Snooze, late_by: timedelta | None = None) -> str:
-    """The reminder message. The first one says how to answer; later ones say which number they are."""
+    """Every reminder shows its snooze id; the first one says how to answer."""
     count = snooze.sent_count + 1
-    tail = "  (reply ok / later)" if count == 1 else f" ({_ordinal(count)})"
-    text = f"🔔 {snooze.text}{tail}"
+    is_choice = isinstance(snooze.confirm, dict) and snooze.confirm.get("kind") == "choice"
+    tail = ("  (reply 1-3 / later)" if is_choice else "  (reply Ok / later)") if count == 1 else f" ({_ordinal(count)})"
+    text = f"🔔 Snooze #{snooze.id}: {snooze.text}{tail}"
     if late_by is not None:
         text += f"\n⏰ late by {format_minutes(round(late_by.total_seconds() / 60))}"
+    if is_choice:
+        options = [option.strip() for option in str(snooze.confirm.get("value", "")).split("|") if option.strip()]
+        text += "\n" + " · ".join(f"{index} {option}" for index, option in enumerate(options, 1))
     return text
 
 
