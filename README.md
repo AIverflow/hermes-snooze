@@ -1,6 +1,6 @@
 # Snooze
 
-Snooze is a reminder plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It repeats a reminder until you confirm it, then can ask the agent to do a follow-up. Reminders are sent by the gateway without an LLM call.
+Snooze is a [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin for reminders that can repeat daily, ask you to choose an answer, and be created from scripts. The gateway sends reminders without an LLM call.
 
 ## Install
 
@@ -22,9 +22,7 @@ From a supported chat, create a reminder:
 /snooze Take my pill in 30m every 5m
 ```
 
-Reply `Ok` to stop it, or use `/snooze list` to see active reminders. Run `/snooze test` to check delivery and confirmation.
-
-The plugin can use the chat where a reminder was created, or one configured Telegram or Discord home channel. See [setup and configuration](docs/user-guide.md#setup-and-configuration) for details.
+For [setup](docs/user-guide.md#setup-and-configuration), [commands](docs/user-guide.md#commands), [confirmations](docs/user-guide.md#confirmations), [recurrence](docs/user-guide.md#create-a-reminder), and [script use](docs/user-guide.md#create-from-scripts), see the user guide.
 
 ## Limits
 
@@ -32,5 +30,3 @@ The plugin can use the chat where a reminder was created, or one configured Tele
 - Snooze does not support voice-note confirmations or WhatsApp Cloud API.
 - Reaction confirmations are supported only in Telegram private chats.
 - Discord and Telegram destinations must be configured in Hermes.
-
-See the [user guide](docs/user-guide.md) for commands, confirmation rules, configuration, troubleshooting, and development.

@@ -32,10 +32,10 @@ Hermes owns the home channel setting. Configure the bot and select its destinati
 
 ## Create a reminder
 
-Use `/snooze` followed by the reminder text and optional timing clauses:
+Use `/snooze` followed by the reminder text and optional clauses:
 
 ```text
-/snooze <what> [at <time> | in <duration>] [every <duration>] [until <time>] [daily | weekdays | on <days>] [ok <word>] [then <action>]
+/snooze <what> [at <time> | in <duration>] [every <duration>] [until <time>] [daily | weekdays | on <days>] [ok <word> | ok <a>|<b>|…] [then <action>]
 ```
 
 | Clause | Meaning |
@@ -43,27 +43,17 @@ Use `/snooze` followed by the reminder text and optional timing clauses:
 | `at <time>` | First reminder at a time of day. If that time has passed, it means tomorrow. |
 | `in <duration>` | First reminder after a delay. Use either `at` or `in`. |
 | `every <duration>` | Repeat interval. Defaults to 10 minutes. |
-| `until <time>` | Stop at the first such time after the first reminder. Without it, configured caps apply. |
-| `daily`, `weekdays`, `on <days>` | Start a new occurrence every day, Monday to Friday, or on listed days (for example, `on mon,thu` or `on mon-fri`). |
-| `ok <word>` | Require a word, emoji, or matching rule to confirm. See [Confirmations](#confirmations). |
+| `until <time>` | Stop at the first such time after the first reminder. On a recurrence, this applies to each day's occurrence. Without it, configured caps apply. |
+| `daily`, `weekdays`, `on <days>` | Start a new occurrence every day, Monday to Friday, or on listed days; for example, `/snooze Water plants at 8am on mon,thu`. |
+| `ok <word>` | Require a word, emoji, contains rule, or any message. See [Confirmations](#confirmations). |
+| `ok <a>\|<b>\|…` | Require one of 2–9 distinct, non-empty options; for example, `/snooze Dinner? at 8pm ok asian|french|italian then order it`. |
 | `then <action>` | Ask the agent to do something after confirmation. See [Follow-up actions](#follow-up-actions). |
 
-Times use the configured time zone: `8am`, `8:30am`, `4pm`, or `16:00`. Durations accept forms such as `10m`, `1h`, `90s`, `1h30m`, `10 min`, `1 hour`, `2hours`, `30 minutes`, or `1 h 30 min` (units `s`, `m`, `h`, also `sec`/`secs`/`second`/`seconds`, `min`/`mins`/`minute`/`minutes`, and `hr`/`hrs`/`hour`/`hours`). The minimum is one minute.
+Times use the configured time zone, in forms such as `8am` or `16:00`. Durations accept compact and spoken unit forms, including seconds, minutes, and hours; for example, `/snooze Call mom in 1 hour 30 minutes`. Units may be joined or separated by spaces. The minimum is one minute. A recurrence requires `at <time>`; it cannot be combined with `in <duration>`.
 
-Clauses can appear in any order after the reminder text. The parser reads clauses from the end; text before the clauses is the reminder. For example, `Call mom before 6pm at 4pm` has reminder text `Call mom before 6pm`. A short form is also supported: `/snooze Wake up 8am 10m` means `at 8am every 10m`; a trailing time alone means `at` that time. A time after `before`, `by`, `after`, `around`, `since`, `from` or `to` stays part of the text. Clause keywords are case-insensitive.
+Clauses can appear in any order after the reminder text. The parser reads clauses from the end; text before the clauses is the reminder. For example, `Call mom before 6pm at 4pm` keeps `Call mom before 6pm` as the text. A short form such as `/snooze Wake up 8am 10m` means `at 8am every 10m`; a trailing time alone means `at` that time. A time after `before`, `by`, `after`, `around`, `since`, `from` or `to` stays part of the text. Clause keywords are case-insensitive.
 
-Examples:
-
-```text
-/snooze Wake up at 8am every 10m
-/snooze Wake up 8am 10m
-/snooze Take my pill in 30m every 5m ok taken
-/snooze Send the report at 4pm ok contains:sent
-/snooze Stretch in 1h every 20m ok 💪
-/snooze Take my pill at 8am daily
-```
-
-The creation reply summarizes the reminder, its schedule and destination, and shows how to confirm it, including `/snooze ok <id>` as a fallback. Every reminder message includes its snooze ID so overlapping reminders can be identified.
+The creation reply summarizes the reminder, its schedule and destination. Every reminder message includes its snooze ID so overlapping reminders can be identified.
 
 ## Commands
 
@@ -92,17 +82,39 @@ By default, reply `Ok` to confirm. The `ok` clause can change the rule:
 | `ok <emoji>` | That emoji as a message or reaction |
 | `ok contains:<word>` | Any message containing the word |
 | `ok any` | Any message |
-| `ok <a>|<b>|<c>` | One listed option, by number or option text; the answer is passed to the follow-up action |
+| `ok <a>\|<b>\|…` | One of 2–9 distinct, non-empty options, by number or option text; the answer is passed to the follow-up action |
 
 Matching ignores case, extra spaces, punctuation, emoji skin tones and common check-mark variations. `OK!`, `ok 👍🏽` and `✔️` match their corresponding rules.
 
 `later`, `later 30`, `later 1h` and `not now` always postpone the reminder, even with `ok any`. For word and emoji rules, extra text can both confirm and continue to the agent: `ok, and book a table for 8`. For `any` and `contains`, the whole message is used as the answer and consumed.
 
-For a choice, every reminder shows numbered options; reply with the number or option text. For example, `/snooze Dinner? at 8pm ok asian|french|italian then order it` can be answered with `2`, and the agent receives `french` with the follow-up action. `/snooze ok <id>` cannot answer a choice; reply in the chat instead.
+For a choice, every reminder shows numbered options; reply with the number or option text. The selected option word is passed to the follow-up action. `/snooze ok <id>` cannot answer a choice; reply in the chat instead. On a recurring reminder, `later` delays only today's occurrence; it does not move the next scheduled day.
 
-A reply to a reminder message selects that snooze. Otherwise, Snooze selects the active reminder that sent most recently. Slash commands continue to Hermes and are not treated as answers. A whole-message `yes` starts a reminder waiting for setup confirmation.
+A reply to a reminder message selects that snooze when its ID matches a currently known Snooze reminder message. An explicit reply-to ID with no match is ignored; it never falls back to another reminder. Without a reply-to ID, Snooze selects the active reminder that sent most recently. Slash commands continue to Hermes and are not treated as answers. A whole-message `yes` starts a reminder waiting for setup confirmation.
 
 Only the user and chat the reminder was sent to can confirm it. Reactions do not carry a user ID, so reaction confirmation is accepted only for emoji rules in private chats and only on the latest reminder message.
+
+## Create from scripts
+
+Use the Hermes CLI to create a snooze without an agent call, then check its state later. The text uses the same grammar as `/snooze` and is sent to the profile's notification target:
+
+```bash
+id=$(hermes -p matt snooze add "Backup failed in 1m")
+hermes -p matt snooze status "$id"
+```
+
+Add `--wait` to block until the occurrence ends and print its answer on stdout. The summary and wait notice go to stderr, so command substitution captures only the answer:
+
+```bash
+choice=$(hermes -p matt snooze add "Vinyl delivery in 1m ok done" --wait)
+[ $? -eq 0 ] && ./order.sh "$choice"
+```
+
+Use `--timeout SECONDS` with `--wait` to stop waiting after that many seconds; `0` (the default) waits forever. A timeout leaves the snooze running, so check it later with `status`.
+
+Quote the snooze text because `|` is a shell pipe. On success, `add` prints the ID on stdout and the creation summary on stderr, then exits 0. If the gateway is not running for the profile, the summary warns that the reminder will not be sent. Parse, target and store errors go to stderr and exit 2. `status` prints the state and, when present, the answer; it exits 0 for a known ID and 2 for an invalid or unknown ID.
+
+With `--wait`, exit codes are `0` for answered, `2` for a parse/store error or recurring snooze, `3` for missed, `4` for cancelled, `5` for timeout, and `130` if interrupted with Ctrl-C. An answered snooze prints its answer on stdout (an empty line when there is no answer).
 
 ## Follow-up actions
 
@@ -121,7 +133,7 @@ From CLI or Desktop, `/snooze ok` confirms the reminder but does not run its fol
 
 ## Agent tool
 
-The agent can create reminders with `snooze_create`. It requires `text` and `first_at` (ISO 8601 in local time); `every`, `until`, `confirm`, and `then` are optional. Its argument details live in the tool schema in `commands.py`; its response uses the same summary shown for a chat command.
+The agent can create reminders with `snooze_create`. It requires `text` and `first_at` (ISO 8601 in local time); `every`, `until`, `recurrence`, `confirm`, and `then` are optional. `recurrence` accepts `daily`, `weekdays`, or day lists and ranges. `confirm` accepts `ok`, a word, emoji, `any`, `contains:<word>`, or a `|`-separated choice. Its argument details live in the tool schema in `commands.py`; its response uses the same summary shown for a chat command.
 
 ## Lifecycle and stored data
 
@@ -133,7 +145,7 @@ The agent can create reminders with `snooze_create`. It requires `text` and `fir
 | `missed` | Setup was not confirmed in time or a configured cap was reached. |
 | `cancelled` | Stopped with `/snooze cancel`. |
 
-A recurring snooze returns to `active` after each answer or miss; only `/snooze cancel <id>` ends the series.
+A recurring snooze returns to `active` after each answer or miss. Its stored `answer` is the latest choice word or free-text answer, `days` stores the recurrence days, and `span` stores the daily reminder window; only `/snooze cancel <id>` ends the series.
 
 Snoozes are stored per profile in the plugin data directory. `snoozes.json` contains records with UTC ISO 8601 timestamps and is updated atomically. `snoozes.lock` protects changes to the data file; `sender.lock` ensures only one process sends reminders at a time.
 

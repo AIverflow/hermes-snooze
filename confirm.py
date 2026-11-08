@@ -264,7 +264,9 @@ def match(
     replied = None
     if reply_to_id is not None and str(reply_to_id) != "":
         hits = [s for s in mine if _same(s.last_message_id, reply_to_id)]
-        replied = hits[-1] if hits else None
+        if not hits:
+            return _NO_MATCH
+        replied = hits[-1]
 
     if replied is not None:
         active = replied if replied.state == ACTIVE else None

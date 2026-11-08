@@ -282,8 +282,10 @@ class WhichSnooze(unittest.TestCase):
         self.assertEqual(run("ok", s, reply_to="56").snooze_id, 2)
         self.assertEqual(run("ok", s, reply_to=56).snooze_id, 2)
 
-    def test_reply_to_other_message_falls_back_to_last_sent(self):
-        self.assertEqual(run("ok", self.three(), reply_to="zzz").snooze_id, 2)
+    def test_reply_to_unknown_message_does_not_fall_back_to_another_snooze(self):
+        decision = run("ok", self.three(), reply_to="zzz")
+        self.assertEqual(decision.action, "none")
+        self.assertIsNone(decision.snooze_id)
 
     def test_later_follows_same_rule(self):
         d = run("later 5", self.three(), reply_to="m1")

@@ -789,6 +789,21 @@ class ToolTest(Base):
         self.assertEqual(s.schedule.until, "2026-11-07T17:00:00+00:00")
         self.assertEqual(s.confirm, {"kind": "ok", "value": ""})
 
+    def test_recurrence_weekdays(self):
+        self.call(text="Wake up", first_at="2026-11-09T08:00", recurrence="weekdays")
+        self.assertEqual(self.store.load()[0].schedule.days, [0, 1, 2, 3, 4])
+
+    def test_recurrence_moves_first_at_to_next_allowed_day_at_same_local_time(self):
+        self.call(text="Wake up", first_at="2026-11-07T16:00", recurrence="mon,thu")
+        s = self.store.load()[0]
+        self.assertEqual(s.schedule.days, [0, 3])
+        self.assertEqual(s.schedule.first_at, "2026-11-09T15:00:00+00:00")
+
+    def test_invalid_recurrence_returns_error_without_creating(self):
+        result = self.call(text="Wake up", first_at="2026-11-07T16:00", recurrence="someday")
+        self.assertEqual(result["error"], "recurrence must be daily, weekdays, or days such as mon,thu or mon-fri.")
+        self.assertEqual(self.store.load(), [])
+
     def test_every_forms(self):
         for value, expected in ((5, 5), ("5", 5), ("1h", 60), ("90s", 1.5), (2.5, 2.5)):
             with self.subTest(value=value):
@@ -817,6 +832,18 @@ class ToolTest(Base):
     def test_confirm_dict(self):
         self.call(text="Wake up", first_at="2026-11-07T16:00", confirm={"kind": "word", "value": "done"})
         self.assertEqual(self.store.load()[0].confirm, {"kind": "word", "value": "done"})
+
+    def test_choice_confirm_string_and_dict(self):
+        for value in ("a|b", {"kind": "choice", "value": "a|b"}):
+            with self.subTest(value=value):
+                result = self.call(text="Choose", first_at="2026-11-07T16:00", confirm=value)
+                self.assertTrue(result["ok"])
+                self.assertEqual(self.store.load()[-1].confirm, {"kind": "choice", "value": "a|b"})
+
+    def test_choice_confirm_dict_rejects_non_choice_value(self):
+        result = self.call(text="Choose", first_at="2026-11-07T16:00", confirm={"kind": "choice", "value": "a"})
+        self.assertEqual(result["error"], commands._BAD_CONFIRM)
+        self.assertEqual(self.store.load(), [])
 
     def test_errors_set_nothing(self):
         cases = {

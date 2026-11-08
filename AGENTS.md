@@ -4,12 +4,15 @@ Hermes Agent plugin: a reminder that repeats on your phone until you confirm (wo
 
 ## Code layout
 
+Before any ticket, read `.tickets/WORKFLOW.md`.
+
 The repo root is the plugin folder.
 
 | Path | What | Imports Hermes? |
 |---|---|---|
 | `plugin.yaml`, `__init__.py` | Manifest, `register(ctx)` | yes, but only inside `register()` |
 | `commands.py`, `hooks.py`, `send.py` | Hermes glue | yes |
+| `cli.py` | Hermes CLI glue | yes |
 | `parse.py` | `/snooze` text → spec | **no** |
 | `store.py` | `snoozes.json` + file lock | **no** |
 | `echo.py` | Times, durations and the echo text shown to the user | **no** |

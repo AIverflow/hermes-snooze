@@ -246,8 +246,11 @@ def _confirm_rule(value: Any) -> ConfirmRule | str:
     """A ConfirmRule from the tool's `confirm` value, or an error message."""
     if isinstance(value, dict):
         kind, text = str(value.get("kind") or "ok").lower(), str(value.get("value") or "")
-        if kind not in ("ok", "word", "contains", "any", "emoji"):
-            return f"confirm kind {kind!r} is not one of ok, word, contains, any, emoji."
+        if kind not in ("ok", "word", "contains", "any", "emoji", "choice"):
+            return f"confirm kind {kind!r} is not one of ok, word, contains, any, emoji, choice."
+        if kind == "choice":
+            rule = _parse.parse_ok_arg(text)
+            return rule if isinstance(rule, ConfirmRule) and rule.kind == "choice" else _BAD_CONFIRM
         if kind in ("word", "contains", "emoji") and not text.strip():
             return f"confirm kind {kind!r} needs a value."
         return ConfirmRule(kind, "" if kind in ("ok", "any") else text)
@@ -499,6 +502,22 @@ class Commands:
         record, capped, settings, now = self._add(spec, target)
         return self._echo(record, now, where, capped, settings)
 
+    def create_from_cli(self, text: str) -> tuple[Snooze | None, str]:
+        """Create through the CLI using the same parser, target and store path as other entry points."""
+        spec = self._parse(text)
+        if isinstance(spec, ParseError):
+            return None, f"{spec.message}\nExample: {spec.example}"
+
+        target, where = self._tool_target()
+        if target is None:
+            return None, self._no_target_text()
+
+        try:
+            record, capped, settings, now = self._add(spec, target)
+        except StoreError as exc:
+            return None, str(exc)
+        return record, self._echo(record, now, where, capped, settings)
+
     def _echo(self, record: Snooze, now: datetime, where: str, capped: bool, settings: Settings) -> str:
         """The echo of a new snooze, plus the warning if no gateway runs for the profile (none if it cannot be told).
 
@@ -534,6 +553,22 @@ class Commands:
         if first_at < now:
             return {"error": "first_at is in the past."}
 
+        days = None
+        recurrence = args.get("recurrence")
+        if recurrence is not None:
+            value = str(recurrence).strip().casefold()
+            if value == "daily":
+                days = frozenset(range(7))
+            elif value == "weekdays":
+                days = frozenset(range(5))
+            else:
+                days = _parse.parse_days(value)
+            if days is None:
+                return {"error": "recurrence must be daily, weekdays, or days such as mon,thu or mon-fri."}
+            if first_at.astimezone(zone).weekday() not in days:
+                local_time = first_at.astimezone(zone).time().replace(tzinfo=None)
+                first_at = _parse.next_on_days(local_time, first_at, zone, days)
+
         until = self._tool_time(args.get("until"), "until", zone)
         if isinstance(until, str):
             return {"error": until}
@@ -560,7 +595,14 @@ class Commands:
             return {"error": self._no_target_text()}
 
         spec = Spec(
-            text=text, first_at=first_at, every=every, until=until, confirm=rule, then=then, tz=settings.timezone
+            text=text,
+            first_at=first_at,
+            every=every,
+            until=until,
+            confirm=rule,
+            then=then,
+            tz=settings.timezone,
+            days=days,
         )
         record, capped, settings, now = self._add(spec, target)
         started = record.state == ACTIVE
@@ -828,10 +870,20 @@ TOOL_SCHEMA = {
                 "type": "string",
                 "description": "Stop time, ISO 8601, after first_at. Omit to use the plugin's default cap.",
             },
+            "recurrence": {
+                "type": "string",
+                "description": (
+                    "Optional. Days to repeat on: 'daily', 'weekdays', or days such as 'mon,thu' or 'mon-fri'. "
+                    "Each day starts a new occurrence at the time of first_at."
+                ),
+            },
             "confirm": {
                 "type": "string",
                 "description": (
-                    "How the user confirms: 'ok' (default), a word, an emoji, 'any' (any message) or 'contains:<word>'."
+                    "How the user confirms: 'ok' (default), a word, an emoji, 'any' (any message) or "
+                    "'contains:<word>'; or options separated by | for a choice, for example "
+                    "'asian|french|italian' (2 to 9 one-word options); "
+                    "the user replies with an option or its number."
                 ),
             },
             "then": {
@@ -848,7 +900,7 @@ TOOL_SCHEMA = {
 
 
 def register_all(ctx: Any, run_then: Callable[[Snooze, Any], None] | None = None) -> Commands:
-    """Register the `/snooze` command and the `snooze_create` tool on `ctx`."""
+    """Register the `/snooze` command, `snooze_create` tool and CLI command on `ctx`."""
     handlers = Commands(ctx, run_then=run_then)
     ctx.register_command(
         "snooze",
@@ -867,4 +919,7 @@ def register_all(ctx: Any, run_then: Callable[[Snooze, Any], None] | None = None
         description=TOOL_SCHEMA["description"],
         emoji="⏰",
     )
+    from . import cli
+
+    cli.register(ctx, handlers)
     return handlers
