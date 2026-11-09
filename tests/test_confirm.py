@@ -282,10 +282,10 @@ class WhichSnooze(unittest.TestCase):
         self.assertEqual(run("ok", s, reply_to="56").snooze_id, 2)
         self.assertEqual(run("ok", s, reply_to=56).snooze_id, 2)
 
-    def test_reply_to_unknown_message_does_not_fall_back_to_another_snooze(self):
+    def test_reply_to_an_older_message_answers_the_latest_reminder(self):
+        # The user answers after the latest reminder, so that one counts.
         decision = run("ok", self.three(), reply_to="zzz")
-        self.assertEqual(decision.action, "none")
-        self.assertIsNone(decision.snooze_id)
+        self.assertEqual((decision.action, decision.snooze_id), ("confirm", 2))
 
     def test_later_follows_same_rule(self):
         d = run("later 5", self.three(), reply_to="m1")
@@ -397,6 +397,10 @@ class Reaction(unittest.TestCase):
         ]
         d = run("👍", s, sender=self.DM, reply_to="m1", is_reaction=True)
         self.assertEqual(d.snooze_id, 1)
+
+    def test_reaction_on_an_unknown_message_is_ignored(self):
+        s = [snooze(id=1, confirm_rule="👍", last_message_id="m1")]
+        self.assertEqual(run("👍", s, sender=self.DM, reply_to="zzz", is_reaction=True).action, "none")
 
     def test_wrong_emoji_reaction(self):
         s = [snooze(confirm_rule="👍")]

@@ -169,10 +169,9 @@ class ValidateSetupOnTest(Base):
         echo = self.run_cmd("Wake up at 4pm every 10m", source=telegram_source())
         self.assertIn("stops 18:00 or after 10 reminders", echo)
 
-    def test_explicit_until_is_not_capped(self):
+    def test_explicit_until_keeps_its_time_and_shows_the_reminder_cap(self):
         echo = self.run_cmd("Wake up at 4pm every 10m until 11pm", source=telegram_source())
-        self.assertIn("stops 23:00", echo)
-        self.assertNotIn("reminders", echo)
+        self.assertIn("stops 23:00 or after 10 reminders", echo)
 
     def test_tomorrow_label(self):
         echo = self.run_cmd("Wake up 8am 10m", source=telegram_source())
@@ -228,6 +227,42 @@ class ValidateSetupOffTest(Base):
         self.assertNotIn("`yes`", echo)
         self.assertIn("Snooze #1 set", echo)
         self.assertIn("Undo:     /snooze cancel 1", echo)
+
+
+class ParseErrorReplyTest(Base):
+    """Rejected `/snooze` text names the clause in fault and creates no snooze."""
+
+    def assertRefused(self, text, *fragments):
+        reply = self.run_cmd(text, source=telegram_source())
+        self.assertIn("Nothing was set", reply)
+        self.assertIn("Example: /snooze", reply)
+        for fragment in fragments:
+            self.assertIn(fragment, reply)
+        self.assertEqual(self.store.load(), [])
+        return reply
+
+    def test_trailing_word_after_a_clause(self):
+        reply = self.assertRefused("Send report at 16:00 every 10m please", "`please`")
+        self.assertNotIn("Missing when to start", reply)
+
+    def test_spoken_duration(self):
+        self.assertRefused("Send report at 16:00 every ten minutes", "`every ten minutes`")
+
+    def test_unknown_unit(self):
+        self.assertRefused("Send report at 16:00 every 10x", "`every 10x`")
+
+    def test_contradictory_starts(self):
+        self.assertRefused("Send report at 16:00 in 30m", "Two start times")
+
+    def test_legit_sentences_still_create(self):
+        record = self.create("Call mom before 6pm at 4pm")
+        self.assertEqual(record.text, "Call mom before 6pm")
+
+    def test_help_requires_a_start_and_shows_the_short_form(self):
+        usage = self.run_cmd("").splitlines()[0]
+        self.assertIn("(at <time> | in <duration>)", usage)
+        self.assertNotIn("[at <time>", usage)
+        self.assertIn(commands._parse.EXAMPLE_SHORT, self.run_cmd(""))
 
 
 class OkCommandTest(Base):
@@ -514,7 +549,62 @@ class LaterTest(Base):
         self.run_cmd("later 30")
         saved = self.store.load()[0]
         self.assertEqual(saved.next_at, "2026-11-07T10:30:00+00:00")
-        self.assertEqual(saved.schedule.until, "2026-11-07T10:37:00+00:00")
+        self.assertEqual(saved.schedule.until, "2026-11-07T11:40:00+00:00")  # 10:30 + 10 reminders * 7 min
+
+    def test_later_reaching_until_exactly_promises_a_real_reminder(self):
+        until = NOW + timedelta(minutes=10)
+        self.add(
+            schedule=Schedule(first_at=NOW.isoformat(), every=10, until=until.isoformat(), tz="Europe/Paris"),
+            sent_count=1,
+            next_at=until.isoformat(),
+        )
+        self.assertIn("back at 11:10", self.run_cmd("later 10"))
+        saved = self.store.load()[0]
+        self.assertEqual(saved.next_at, "2026-11-07T10:10:00+00:00")
+        self.assertEqual(saved.schedule.until, "2026-11-07T11:40:00+00:00")  # 10:10 + 9 reminders left * 10 min
+        at = NOW + timedelta(minutes=10)
+        self.assertEqual(schedule.due(saved, at, 10).kind, schedule.SEND)
+
+    def test_later_refused_when_the_reminder_cap_is_reached(self):
+        self.add(sent_count=10, next_at=(NOW + timedelta(minutes=10)).isoformat())
+        before = self.store.load()[0]
+        reply = self.run_cmd("later 30")
+        self.assertNotIn("back at", reply)
+        self.assertIn("10 reminders", reply)
+        self.assertEqual(self.store.load()[0], before)
+
+    def test_later_uses_the_configured_reminder_cap(self):
+        self.ctx.config["cap_reminders"] = 3
+        self.add(sent_count=3, next_at=(NOW + timedelta(minutes=10)).isoformat())
+        before = self.store.load()[0]
+        self.assertIn("3 reminders", self.run_cmd("later 30"))
+        self.assertEqual(self.store.load()[0], before)
+
+    def test_later_allowed_below_the_cap(self):
+        self.add(sent_count=9, next_at=(NOW + timedelta(minutes=10)).isoformat())
+        self.assertIn("back at 11:30", self.run_cmd("later 30"))
+
+    def test_later_on_a_recurring_snooze_keeps_the_next_occurrence_time(self):
+        first = datetime(2026, 11, 7, 22, 30, tzinfo=timezone.utc)  # 23:30 in Paris
+        self.now = first + timedelta(minutes=20)
+        self.add(
+            schedule=Schedule(
+                first_at=first.isoformat(),
+                every=10,
+                until=(first + timedelta(hours=1)).isoformat(),
+                tz="Europe/Paris",
+                days=list(range(7)),
+                span=60,
+            ),
+            sent_count=1,
+            next_at=(first + timedelta(minutes=10)).isoformat(),
+        )
+        self.assertIn(
+            "back at tomorrow 00:25", self.run_cmd("later 35")
+        )  # crosses midnight: 23:25 UTC is 00:25 in Paris
+        saved = self.store.load()[0]
+        new_first = schedule.rearm(saved, self.now + timedelta(minutes=50))
+        self.assertEqual(new_first, first + timedelta(days=1))
 
     def test_later_after_a_reminder_counts_from_now(self):
         # reminder sent at 10:00, next at 10:10; `later 5` at 10:01 -> 10:06, not 10:15
@@ -879,6 +969,44 @@ class ToolTest(Base):
 
     def test_non_dict_args(self):
         self.assertIn("error", json.loads(self.cmds.tool(None)))
+
+
+class ToolRecurrenceUntilTest(Base):
+    """`until` keeps its span after `first_at` when `first_at` moves to the next recurrence day."""
+
+    def call(self, **args):
+        return json.loads(self.cmds.tool(args))
+
+    def setUp(self):
+        super().setUp()
+        self.env = {
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "123",
+            "HERMES_SESSION_USER_ID": "42",
+        }
+
+    def test_until_follows_first_at_to_the_next_allowed_day(self):
+        result = self.call(
+            text="Wake up",
+            first_at="2026-11-07T16:00",  # a Saturday
+            until="2026-11-07T18:00",
+            recurrence="weekdays",
+        )
+        self.assertTrue(result["ok"], result)
+        s = self.store.load()[0]
+        self.assertEqual(s.schedule.first_at, "2026-11-09T15:00:00+00:00")  # Monday 16:00 Paris
+        self.assertEqual(s.schedule.until, "2026-11-09T17:00:00+00:00")
+        self.assertEqual(s.schedule.span, 120)
+
+    def test_until_before_first_at_is_still_refused_with_recurrence(self):
+        result = self.call(
+            text="Wake up",
+            first_at="2026-11-07T16:00",
+            until="2026-11-07T15:00",
+            recurrence="weekdays",
+        )
+        self.assertEqual(result["error"], "until must be after first_at.")
+        self.assertEqual(self.store.load(), [])
 
 
 class MediaTagTest(Base):

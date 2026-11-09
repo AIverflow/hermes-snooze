@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from snooze import echo
+from snooze import confirm, echo
 from snooze.store import ACTIVE, PENDING, Schedule, Snooze, Target
 
 NOW = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)  # 11:00 in Paris
@@ -43,7 +43,35 @@ class ReminderTextTest(unittest.TestCase):
         )
 
     def test_first_reminder_says_how_to_answer(self):
-        self.assertEqual(echo.reminder_text(self.snooze()), "🔔 Snooze #14: Stretch  (reply Ok / later)")
+        self.assertEqual(echo.reminder_text(self.snooze()), '🔔 Snooze #14: Stretch  (reply "Ok" / later)')
+
+    def test_first_reminder_instruction_matches_the_confirm_rule(self):
+        cases = [
+            ({"kind": "word", "value": "taken"}, 'reply "taken"', "taken"),
+            ({"kind": "emoji", "value": "✅"}, "send ✅", "✅"),
+            ({"kind": "contains", "value": "sent"}, 'reply with a message containing "sent"', "I sent it"),
+            ({"kind": "any", "value": ""}, "reply with any message", "ready now"),
+        ]
+        for rule, instruction, answer in cases:
+            with self.subTest(rule=rule):
+                snooze = self.snooze()
+                snooze.confirm = rule
+                snooze.state = ACTIVE
+                snooze.last_sent_at = NOW.isoformat()
+                text = echo.reminder_text(snooze)
+                self.assertIn(f"({instruction} / later)", text)
+                self.assertNotIn('reply "Ok"', text)
+                decision = confirm.match(answer, [snooze], confirm.Sender("telegram", "1", "1"))
+                self.assertEqual(decision.action, confirm.CONFIRM)
+
+    def test_choice_instruction_covers_every_option(self):
+        for count in (2, 4, 9):
+            with self.subTest(count=count):
+                snooze = self.snooze()
+                snooze.confirm = {"kind": "choice", "value": "|".join(f"option{i}" for i in range(1, count + 1))}
+                text = echo.reminder_text(snooze)
+                self.assertIn(f"reply 1-{count} / later", text)
+                self.assertIn(f"{count} option{count}", text)
 
     def test_next_reminders_are_numbered(self):
         for sent, label in ((1, "2nd"), (2, "3rd"), (3, "4th"), (10, "11th"), (11, "12th"), (12, "13th"), (20, "21st")):
@@ -99,6 +127,9 @@ class GatewayWarningTest(unittest.TestCase):
 
     def test_no_warning_by_default(self):
         self.assertNotIn("gateway", self.render())
+
+    def test_explicit_until_still_shows_the_reminder_cap(self):
+        self.assertIn("or after 10 reminders", self.render())
 
     def test_choice_stop_text_lists_numbered_options(self):
         sn = Snooze(

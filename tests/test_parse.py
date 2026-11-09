@@ -202,10 +202,8 @@ class UnknownWordsStayInTextTest(unittest.TestCase):
         self.assertEqual(s.text, "Dinner at 7pm")
         self.assertEqual(s.first_at, paris(18))
 
-    def test_at_and_in_together_second_one_stays_in_text(self):
-        s = parse("Meet at 5pm in 10m")
-        self.assertEqual(s.text, "Meet at 5pm")
-        self.assertEqual(s.first_at, NOW.astimezone(UTC) + timedelta(minutes=10))
+    def test_at_and_in_together_are_refused(self):
+        self.assertIsInstance(parse("Meet at 5pm in 10m"), p.ParseError)
 
 
 class TimeTest(unittest.TestCase):
@@ -359,7 +357,7 @@ class RecurrenceTest(unittest.TestCase):
     def test_invalid_range_stays_in_text(self):
         s = parse("Take pill at 8am on fri-mon")
         self.assertIsInstance(s, p.ParseError)
-        self.assertIn("Missing when to start", s.message)
+        self.assertIn("`on fri-mon`", s.message)
 
     def test_on_shelf_stays_in_text(self):
         s = parse("Put the book on shelf at 8am")
@@ -495,6 +493,94 @@ class BadInputTest(unittest.TestCase):
     def test_error_str_has_example(self):
         e = parse("")
         self.assertIn(e.example, str(e))
+
+
+class PreciseErrorTest(unittest.TestCase):
+    """Errors name the clause in fault: missing start, bad duration, unknown suffix, two starts."""
+
+    def assertErrorAbout(self, text, *fragments):
+        e = parse(text)
+        self.assertIsInstance(e, p.ParseError, e)
+        for fragment in fragments:
+            self.assertIn(fragment, e.message)
+        self.assertTrue(e.example.startswith("/snooze "))
+        # The example is a valid command.
+        self.assertIsInstance(parse(e.example.removeprefix("/snooze ")), p.Spec, e.example)
+        return e
+
+    def test_missing_start_stays_generic(self):
+        for text in ("Send the report", "Take pill every 5m", "Meet me in Paris", "Call mom before 6pm"):
+            with self.subTest(text=text):
+                self.assertErrorAbout(text, "Missing when to start")
+
+    def test_trailing_word_after_every_is_an_unrecognized_suffix(self):
+        e = self.assertErrorAbout("Send report at 16:00 every 10m please", "`please`", "`every 10m`")
+        self.assertNotIn("Missing when to start", e.message)
+
+    def test_trailing_word_after_at_is_an_unrecognized_suffix(self):
+        self.assertErrorAbout("Send report at 16:00 please", "`please`", "`at 16:00`")
+
+    def test_several_trailing_words_are_all_named(self):
+        self.assertErrorAbout("Send report at 16:00 thanks a lot", "`thanks a lot`", "`at 16:00`")
+
+    def test_suffix_after_in(self):
+        self.assertErrorAbout("Take pill in 30m please", "`please`", "`in 30m`")
+
+    def test_spoken_duration_is_an_invalid_duration(self):
+        e = self.assertErrorAbout("Send report at 16:00 every ten minutes", "`every ten minutes`", "duration")
+        self.assertNotIn("Missing when to start", e.message)
+
+    def test_unknown_unit_is_an_invalid_duration(self):
+        self.assertErrorAbout("Send report at 16:00 every 10x", "`every 10x`", "duration")
+        self.assertErrorAbout("Take pill in 5 pizzas", "`in 5 pizzas`", "duration")
+
+    def test_invalid_time_is_named(self):
+        self.assertErrorAbout("Wake up at 25:00", "`at 25:00`", "time")
+        self.assertErrorAbout("Wake up at 8am until 99:00", "`until 99:00`", "time")
+
+    def test_keyword_without_a_value(self):
+        self.assertErrorAbout("Wake up at 8am every", "`every`")
+        self.assertErrorAbout("Wake up at", "`at`")
+
+    def test_duration_kinds_are_told_apart(self):
+        bad = parse("Send report at 16:00 every 10x")
+        suffix = parse("Send report at 16:00 every 10m please")
+        missing = parse("Send report")
+        two = parse("Send report at 16:00 in 30m")
+        messages = {e.message for e in (bad, suffix, missing, two)}
+        self.assertEqual(len(messages), 4)
+
+    def test_at_then_in_is_contradictory(self):
+        e = self.assertErrorAbout("Send report at 16:00 in 30m", "`at 16:00`", "`in 30m`")
+        self.assertIn("Two start times", e.message)
+
+    def test_in_then_at_is_contradictory(self):
+        self.assertErrorAbout("Send report in 30m at 16:00", "Two start times", "`at 16:00`", "`in 30m`")
+
+    def test_contradictory_starts_with_other_clauses(self):
+        self.assertErrorAbout("Send report at 16:00 in 30m every 5m until 18:00", "Two start times")
+        self.assertErrorAbout("Send report at 16:00 in 30m ok done", "Two start times")
+
+    def test_contradictory_starts_before_then_are_refused_but_then_is_opaque(self):
+        self.assertErrorAbout("Send report at 16:00 in 30m then ping", "Two start times")
+        s = parse("Send report at 16:00 then check at 17:00 in 30m please")
+        self.assertIsInstance(s, p.Spec)
+        self.assertEqual(s.then, "check at 17:00 in 30m please")
+
+    def test_legit_free_text_still_parses(self):
+        cases = {
+            "Call mom before 6pm at 4pm": "Call mom before 6pm",
+            "Meet me in Paris at 4pm": "Meet me in Paris",
+            "Ask what happens at the end in the morning at 4pm": "Ask what happens at the end in the morning",
+            "Dinner at 7pm at 6pm": "Dinner at 7pm",
+            "Water the plants every day in 10m": "Water the plants every day",
+            "Reply please at 4pm": "Reply please",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                s = parse(text)
+                self.assertIsInstance(s, p.Spec, s)
+                self.assertEqual(s.text, expected)
 
 
 if __name__ == "__main__":

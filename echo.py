@@ -113,7 +113,7 @@ def _stop_text(rule: Any) -> str:
     if kind == "any":
         return "reply with any message"
     if kind == "emoji":
-        return f"send {value} (a message or a reaction)"
+        return f"send {value}"
     return 'reply "Ok"'
 
 
@@ -146,9 +146,7 @@ def render_echo(
     if sched.every:
         when.append(f"every {format_minutes(sched.every)}")
     if until:
-        stop = f"stops {format_when(until, zone, now, relative_to=first)}"
-        if capped:
-            stop += f" or after {cap_reminders} reminders"
+        stop = f"stops {format_when(until, zone, now, relative_to=first)} or after {cap_reminders} reminders"
         when.append(stop)
 
     lines = [
@@ -206,12 +204,15 @@ def reminder_text(snooze: Snooze, late_by: timedelta | None = None) -> str:
     """Every reminder shows its snooze id; the first one says how to answer."""
     count = snooze.sent_count + 1
     is_choice = isinstance(snooze.confirm, dict) and snooze.confirm.get("kind") == "choice"
-    tail = ("  (reply 1-3 / later)" if is_choice else "  (reply Ok / later)") if count == 1 else f" ({_ordinal(count)})"
+    options = []
+    if is_choice:
+        options = [option.strip() for option in str(snooze.confirm.get("value", "")).split("|") if option.strip()]
+    instruction = f"reply 1-{len(options)}" if is_choice else _stop_text(snooze.confirm)
+    tail = f"  ({instruction} / later)" if count == 1 else f" ({_ordinal(count)})"
     text = f"🔔 Snooze #{snooze.id}: {snooze.text}{tail}"
     if late_by is not None:
         text += f"\n⏰ late by {format_minutes(round(late_by.total_seconds() / 60))}"
     if is_choice:
-        options = [option.strip() for option in str(snooze.confirm.get("value", "")).split("|") if option.strip()]
         text += "\n" + " · ".join(f"{index} {option}" for index, option in enumerate(options, 1))
     return text
 

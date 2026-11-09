@@ -1,3 +1,4 @@
+import dataclasses
 import unittest
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -121,51 +122,123 @@ class AfterSendTest(unittest.TestCase):
 class ApplyLaterTest(unittest.TestCase):
     def test_moves_next_at(self):
         s = make()
-        at = schedule.apply_later(s, NOW, 30)
+        at = schedule.apply_later(s, NOW, 30, CAP)
         self.assertEqual(at, NOW + timedelta(minutes=30))
         self.assertEqual(s.next_at, at.isoformat())
 
     def test_until_unchanged_when_still_after(self):
         until = NOW + timedelta(hours=1)
         s = make(until=until)
-        schedule.apply_later(s, NOW, 30)
+        schedule.apply_later(s, NOW, 30, CAP)
         self.assertEqual(s.schedule.until, until.isoformat())
 
-    def test_later_past_until_extends_until(self):
-        s = make(until=NOW + timedelta(minutes=10))
-        at = schedule.apply_later(s, NOW, 30)
+    def test_later_past_until_reopens_the_window_for_every_remaining_reminder(self):
+        # until is 10 min away, `later 5h`, 3 reminders left (CAP 4, 1 sent): sends at +5h, +5h10, +5h20, miss at +5h30
+        cap = 4
+        s = make(until=NOW + timedelta(minutes=10), sent_count=1, next_at=NOW + timedelta(minutes=10))
+        at = schedule.apply_later(s, NOW, 300, cap)
+        self.assertEqual(at, NOW + timedelta(hours=5))
+        self.assertEqual(s.schedule.until, (at + timedelta(minutes=30)).isoformat())
+        self.assertEqual(schedule.due(s, at - timedelta(minutes=1), cap).kind, "nothing")
+        for i in range(3):
+            now = at + timedelta(minutes=10 * i)
+            self.assertEqual(schedule.due(s, now, cap).kind, "send", i)
+            schedule.after_send(s, now)
+        self.assertEqual(schedule.due(s, at + timedelta(minutes=29), cap).kind, "nothing")
+        self.assertEqual(schedule.due(s, at + timedelta(minutes=30), cap).kind, "miss")
+
+    def test_later_past_until_with_one_reminder_left_gives_one_interval(self):
+        s = make(until=NOW + timedelta(minutes=10), sent_count=CAP - 1)
+        at = schedule.apply_later(s, NOW, 30, CAP)
         self.assertEqual(s.schedule.until, (at + timedelta(minutes=10)).isoformat())
-        self.assertEqual(schedule.due(s, at, CAP).kind, "send")  # one more reminder
+        self.assertEqual(schedule.due(s, at, CAP).kind, "send")
         schedule.after_send(s, at)
         self.assertEqual(schedule.due(s, at + timedelta(minutes=10), CAP).kind, "miss")
 
+    def test_later_past_until_before_the_first_reminder_counts_the_whole_budget(self):
+        s = make(until=NOW + timedelta(minutes=10), sent_count=0)
+        at = schedule.apply_later(s, NOW, 30, CAP)
+        self.assertEqual(s.schedule.until, (at + timedelta(minutes=10 * CAP)).isoformat())
+
     def test_no_until_stays_none(self):
         s = make()
-        schedule.apply_later(s, NOW, 30)
+        schedule.apply_later(s, NOW, 30, CAP)
         self.assertIsNone(s.schedule.until)
 
     def test_before_first_reminder_pushes_from_that_reminder(self):
         # first reminder at 10:26 (next_at, nothing sent), `later 10` at 09:56 -> 10:36, not 10:06
         s = make(next_at=NOW + timedelta(minutes=26))
-        at = schedule.apply_later(s, NOW - timedelta(minutes=4), 10)
+        at = schedule.apply_later(s, NOW - timedelta(minutes=4), 10, CAP)
         self.assertEqual(at, NOW + timedelta(minutes=36))
         self.assertEqual(s.next_at, at.isoformat())
 
     def test_after_a_reminder_pushes_from_now(self):
         # reminder sent at 10:00, next at 10:10; `later 5` at 10:01 -> 10:06, not 10:15
         s = make(next_at=NOW + timedelta(minutes=10), sent_count=1)
-        at = schedule.apply_later(s, NOW + timedelta(minutes=1), 5)
+        at = schedule.apply_later(s, NOW + timedelta(minutes=1), 5, CAP)
         self.assertEqual(at, NOW + timedelta(minutes=6))
         self.assertEqual(s.next_at, at.isoformat())
 
     def test_overdue_reminder_pushes_from_now(self):
         s = make(next_at=NOW - timedelta(minutes=3))
-        at = schedule.apply_later(s, NOW, 10)
+        at = schedule.apply_later(s, NOW, 10, CAP)
         self.assertEqual(at, NOW + timedelta(minutes=10))
 
     def test_no_next_at_pushes_from_now(self):
         s = make(next_at=None)
-        self.assertEqual(schedule.apply_later(s, NOW, 10), NOW + timedelta(minutes=10))
+        self.assertEqual(schedule.apply_later(s, NOW, 10, CAP), NOW + timedelta(minutes=10))
+
+    def test_later_reaching_until_exactly_reopens_the_window(self):
+        # reminder sent at 10:00, until 10:10, every 10, CAP 10; `later 10` -> 10:10 == until, a boundary `>` would miss
+        s = make(until=NOW + timedelta(minutes=10), sent_count=1, next_at=NOW + timedelta(minutes=10))
+        at = schedule.apply_later(s, NOW, 10, CAP)
+        self.assertEqual(at, NOW + timedelta(minutes=10))
+        self.assertEqual(s.schedule.until, (at + timedelta(minutes=10 * (CAP - 1))).isoformat())
+        self.assertEqual(schedule.due(s, at, CAP).kind, "send")
+        schedule.after_send(s, at)
+        self.assertEqual(schedule.due(s, at + timedelta(minutes=9), CAP).kind, "nothing")  # time to answer
+        self.assertEqual(schedule.due(s, at + timedelta(minutes=10), CAP).kind, "send")  # more reminders remain
+
+    def test_later_just_before_until_keeps_until(self):
+        until = NOW + timedelta(minutes=10)
+        s = make(until=until, sent_count=1)
+        schedule.apply_later(s, NOW, 9, CAP)
+        self.assertEqual(s.schedule.until, until.isoformat())
+
+    def test_later_refused_when_the_reminder_budget_is_spent(self):
+        s = make(until=NOW + timedelta(hours=1), sent_count=CAP, next_at=NOW + timedelta(minutes=10))
+        before = dataclasses.replace(s, schedule=dataclasses.replace(s.schedule))
+        self.assertIsNone(schedule.apply_later(s, NOW, 30, CAP))
+        self.assertEqual(s, before)
+
+    def test_later_allowed_for_the_last_reminder(self):
+        s = make(until=NOW + timedelta(hours=1), sent_count=CAP - 1)
+        at = schedule.apply_later(s, NOW, 30, CAP)
+        self.assertEqual(schedule.due(s, at, CAP).kind, "send")
+
+    def test_accepted_later_on_a_recurring_snooze_crossing_midnight(self):
+        paris = ZoneInfo("Europe/Paris")
+        first = datetime(2026, 11, 6, 23, 30, tzinfo=paris)
+        s = make(until=first + timedelta(hours=1), sent_count=1, next_at=first + timedelta(minutes=10))
+        s.schedule.first_at = utc_iso(first)
+        s.schedule.tz = "Europe/Paris"
+        s.schedule.days = list(range(7))
+        s.schedule.span = 60
+        now = first + timedelta(minutes=20)
+        at = schedule.apply_later(s, now, 35, CAP)
+        self.assertEqual(at.astimezone(paris), datetime(2026, 11, 7, 0, 25, tzinfo=paris))
+        self.assertEqual(schedule.due(s, at, CAP).kind, "send")
+        # answering after the pushed reminder: the next occurrence keeps the 23:30 wall clock
+        new_first = schedule.rearm(s, at + timedelta(minutes=1))
+        self.assertEqual(new_first.astimezone(paris), datetime(2026, 11, 7, 23, 30, tzinfo=paris))
+        self.assertEqual(s.schedule.until, utc_iso(new_first + timedelta(minutes=60)))
+
+    def test_refused_later_on_a_recurring_snooze_changes_nothing(self):
+        s = make(until=NOW + timedelta(hours=1), sent_count=CAP)
+        s.schedule.days = [0, 1, 2]
+        before = dataclasses.replace(s, schedule=dataclasses.replace(s.schedule))
+        self.assertIsNone(schedule.apply_later(s, NOW, 10, CAP))
+        self.assertEqual(s, before)
 
 
 class RearmTest(unittest.TestCase):

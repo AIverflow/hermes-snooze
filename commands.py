@@ -79,8 +79,9 @@ USAGE = {
 }
 
 HELP = (
-    "Usage: /snooze <what> [at <time> | in <duration>] [every <duration>] [until <time>] "
+    "Usage: /snooze <what> (at <time> | in <duration>) [every <duration>] [until <time>] "
     "[daily | weekdays | on <days>] [ok <word>] [then <action>]\n"
+    f"Short form: /snooze <what> <time> [<duration>], for example {_parse.EXAMPLE_SHORT}\n"
     f"Example: {_parse.EXAMPLE_FULL}\n"
     "Other commands: list, ok [id], later [minutes] [id], cancel <id>, yes [id], test"
 )
@@ -187,9 +188,14 @@ def confirm_snooze(snooze: Snooze, now: datetime, answer: str | None = None) -> 
     return f"✅ Done: {snooze.text}{answer_text}"
 
 
-def push_back_snooze(snooze: Snooze, now: datetime, minutes: float) -> str:
-    """The user asked for the next reminder in `minutes`."""
-    at = apply_later(snooze, now, minutes)
+def push_back_snooze(snooze: Snooze, now: datetime, minutes: float, cap_reminders: int) -> str:
+    """The user asked for the next reminder in `minutes`. Refused, with the snooze untouched, at the reminder cap."""
+    at = apply_later(snooze, now, minutes, cap_reminders)
+    if at is None:
+        return (
+            f"⏰ Can't push back #{snooze.id}: it already sent {cap_reminders} reminders, the maximum "
+            f"(cap_reminders). Reply Ok to answer it."
+        )
     return f"⏰ OK, back at {echo.format_when(at, snooze.schedule.tz, now, relative_to=now)}: {snooze.text}"
 
 
@@ -565,15 +571,24 @@ class Commands:
                 days = _parse.parse_days(value)
             if days is None:
                 return {"error": "recurrence must be daily, weekdays, or days such as mon,thu or mon-fri."}
-            if first_at.astimezone(zone).weekday() not in days:
-                local_time = first_at.astimezone(zone).time().replace(tzinfo=None)
-                first_at = _parse.next_on_days(local_time, first_at, zone, days)
 
         until = self._tool_time(args.get("until"), "until", zone)
         if isinstance(until, str):
             return {"error": until}
         if until is not None and until <= first_at:
             return {"error": "until must be after first_at."}
+
+        if days is not None and first_at.astimezone(zone).weekday() not in days:
+            # Move first_at to the next recurrence day; until moves with it, so the span stays the same.
+            local_first = first_at.astimezone(zone)
+            moved = _parse.next_on_days(local_first.time().replace(tzinfo=None), first_at, zone, days)
+            if until is not None:
+                shift = moved.astimezone(zone).date() - local_first.date()
+                local_until = until.astimezone(zone)
+                until = datetime.combine(
+                    local_until.date() + shift, local_until.time().replace(tzinfo=None), tzinfo=zone
+                ).astimezone(timezone.utc)
+            first_at = moved
 
         every = None
         if args.get("every") not in (None, ""):
@@ -732,7 +747,7 @@ class Commands:
         if not confirmed:
             return reply
         if self._run_then is None or target_from_source(source) is None:
-            # No chat to run the agent turn in (CLI / Desktop): see `docs/user-guide.md` ("Follow-up actions").
+            # No chat to run the agent turn in (CLI / Desktop): see `docs/user-guide.md` ("Then-actions").
             if is_recurring(confirmed[0]):
                 return f"{reply}\n{THEN_NOT_RUN_TEXT}"
             return f"✅ Done: {confirmed[0].text}\n{THEN_NOT_RUN_TEXT}"
@@ -754,12 +769,14 @@ class Commands:
             if sid is None:
                 return None
 
+        cap = read_settings(self._ctx).cap_reminders
+
         def run(txn: Txn) -> str:
             s, problem = self._select(txn, sid, ACTIVE)
             if problem:
                 return problem
             delay = minutes if minutes is not None else (s.schedule.every or echo.minutes_value(DEFAULT_EVERY))
-            return push_back_snooze(s, now, delay)
+            return push_back_snooze(s, now, delay, cap)
 
         return self._store().update(run)
 
@@ -907,7 +924,7 @@ def register_all(ctx: Any, run_then: Callable[[Snooze, Any], None] | None = None
         handlers.command,
         description="A reminder that repeats until you confirm it: /snooze <what> at <time> every <duration>",
         args_hint=(
-            "<what> [at <time> | in <duration>] [every <duration>] [daily | weekdays | on <days>] "
+            "<what> (at <time> | in <duration>) [every <duration>] [daily | weekdays | on <days>] "
             "| list | ok | later | cancel | yes | test"
         ),
     )

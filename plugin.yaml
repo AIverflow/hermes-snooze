@@ -1,5 +1,5 @@
 name: snooze
-version: "0.1.0"
+version: "0.2.0"
 description: >-
   A reminder that repeats on your phone until you confirm it, then can hand a follow-up to the agent.
   Zero LLM calls per reminder. Disclosure: (1) a timer task runs in the Hermes gateway and checks due
@@ -28,11 +28,11 @@ config_schema:
   cap_minutes:
     type: int
     default: 120
-    description: "Maximum minutes a snooze may keep repeating."
+    description: "Maximum minutes a snooze keeps sending reminders after its first one, unless an until time is set."
   cap_reminders:
     type: int
     default: 10
-    description: "Maximum number of reminders sent per snooze."
+    description: "Maximum number of reminders sent per occurrence."
   timezone:
     type: str
     default: system

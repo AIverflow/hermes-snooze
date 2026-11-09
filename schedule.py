@@ -122,15 +122,22 @@ def after_send(snooze: Snooze, sent_at: datetime) -> None:
     snooze.last_error = None
 
 
-def apply_later(snooze: Snooze, now: datetime, minutes: float) -> datetime:
-    """Push the next reminder back by `minutes`; return the new time.
+def apply_later(snooze: Snooze, now: datetime, minutes: float, cap_reminders: int) -> datetime | None:
+    """Push the next reminder back by `minutes`; return the new time, or None if it is refused.
+
+    Refused, with the snooze untouched, once `cap_reminders` reminders are sent: `due` would miss at
+    the new time instead of sending, so no reminder can be promised.
 
     Counted from now, except before the first reminder (nothing sent yet): then from the
     first reminder's time, so `later` never moves it earlier.
 
-    A time past `until` moves `until` to one `every` after it: `due` misses at `until`, so the
-    extra reminder is sent and the user still has one interval to answer it.
+    A time at or past `until` reopens the window: `until` becomes `every` times the reminders still
+    allowed (`cap_reminders` minus sent, at least one) after it, so each of them is sent and the user
+    still has one interval to answer the last. `cap_reminders` stays the hard limit. A time before
+    `until` leaves it alone.
     """
+    if snooze.sent_count >= cap_reminders:
+        return None
     current = echo.from_iso(snooze.next_at)
     base = now
     if snooze.sent_count == 0 and current is not None and current > now:
@@ -138,6 +145,7 @@ def apply_later(snooze: Snooze, now: datetime, minutes: float) -> datetime:
     at = base + timedelta(minutes=minutes)
     snooze.next_at = _iso(at)
     until = echo.from_iso(snooze.schedule.until)
-    if until is not None and at > until:
-        snooze.schedule.until = _iso(at + timedelta(minutes=snooze.schedule.every or 1))
+    if until is not None and at >= until:
+        remaining = max(1, cap_reminders - snooze.sent_count)
+        snooze.schedule.until = _iso(at + remaining * timedelta(minutes=snooze.schedule.every or 1))
     return at

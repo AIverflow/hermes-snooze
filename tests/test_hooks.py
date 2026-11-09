@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from snooze import hooks
+from snooze import hooks, schedule
 from snooze.confirm import CONFIRM, LATER, Decision
 from snooze.hooks import Hooks
 from snooze.send import SendError
@@ -351,6 +351,42 @@ class DispatchTest(Base):
         self.assertEqual(self.stored(s).next_at, (NOW + timedelta(minutes=2)).isoformat())
         self.assertTrue(self.sent()[0][1].startswith("⏰ OK, back at"))
         self.assertEqual(self.inject.calls, [])
+
+    async def test_later_reaching_until_exactly_is_followed_by_a_send_at_that_time(self):
+        until = NOW + timedelta(minutes=10)
+        s = self.add(schedule=Schedule(first_at=NOW.isoformat(), every=10, until=until.isoformat(), tz="UTC"))
+        await self.dispatch(event("later 10"))
+        stored = self.stored(s)
+        self.assertEqual(stored.next_at, until.isoformat())
+        self.assertEqual(schedule.due(stored, until, 10).kind, schedule.SEND)
+        self.assertTrue(self.sent()[0][1].startswith("⏰ OK, back at 10:10"))
+
+    async def test_later_refused_at_the_reminder_cap_changes_nothing(self):
+        s = self.add(sent_count=10)
+        before = self.stored(s)
+        result = await self.dispatch(event("later 30"))
+        self.assertEqual(result["action"], "skip")
+        self.assertEqual(self.stored(s), before)
+        reply = self.sent()[0][1]
+        self.assertNotIn("back at", reply)
+        self.assertIn("10 reminders", reply)
+        self.assertEqual(self.inject.calls, [])
+
+    async def test_later_uses_the_configured_reminder_cap(self):
+        self.hooks = Hooks(
+            ensure_timer=self._ensure_timer,
+            inject=self.inject,
+            reply_grace=0,
+            data_dir=lambda: self.dir,
+            now=lambda: NOW,
+            authorizes=self._authorizes,
+            sender=self.sender,
+            cap_reminders=lambda: 2,
+        )
+        s = self.add(sent_count=2)
+        before = self.stored(s)
+        await self.dispatch(event("later 30"))
+        self.assertEqual(self.stored(s), before)
 
     async def test_yes_starts_a_pending_snooze(self):
         s = self.add(state=PENDING)

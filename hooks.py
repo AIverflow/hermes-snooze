@@ -43,7 +43,7 @@ SKIP = {"action": "skip", "reason": "snooze: answer to a reminder"}
 _background_tasks: set = set()  # strong references: the event loop keeps only weak ones
 
 
-# What the agent receives (PLAN §5). See `docs/user-guide.md` ("Follow-up actions").
+# What the agent receives. See `docs/user-guide.md` ("Then-actions").
 def then_prompt(snooze: Snooze, extra: str | None = None) -> str:
     """Build the follow-up request shared by rewrite and injection paths."""
     if snooze.answer is not None:
@@ -136,6 +136,7 @@ class Hooks:
         authorizes: Callable[[Any, Any], bool] = hermes_authorizes,
         sender: ReplySender | None = None,
         ensure_timer: Callable[[], Any] | None = None,
+        cap_reminders: Callable[[], int] | None = None,
     ):
         self._ensure_timer = ensure_timer or (lambda: start_timer(ctx))
         self._data_dir = data_dir
@@ -144,6 +145,11 @@ class Hooks:
         self._sender = sender or HermesSender()
         self._inject = inject or getattr(ctx, "inject_message", None)
         self._reply_grace = reply_grace
+        self._cap_reminders = cap_reminders or (
+            (lambda: commands.read_settings(ctx).cap_reminders)
+            if ctx is not None
+            else (lambda: commands.DEFAULT_CAP_REMINDERS)
+        )
 
     # -- pre_gateway_dispatch ---------------------------------------------------
 
@@ -281,6 +287,7 @@ class Hooks:
     def _apply(self, decision: Decision) -> tuple[str, Snooze] | None:
         """Apply `decision` to the stored snooze. Returns (reply text, the record), or None if it no longer fits."""
         now = self._now()
+        cap = self._cap_reminders()
         wanted = PENDING if decision.action == YES else ACTIVE
 
         def run(txn):
@@ -290,7 +297,7 @@ class Hooks:
             if decision.action == CONFIRM:
                 reply = commands.confirm_snooze(snooze, now, decision.answer)
             elif decision.action == LATER:
-                reply = commands.push_back_snooze(snooze, now, decision.later_minutes)
+                reply = commands.push_back_snooze(snooze, now, decision.later_minutes, cap)
             else:
                 reply = commands.start_snooze(snooze, now)
             return reply, dataclasses.replace(snooze)
@@ -318,7 +325,7 @@ class Hooks:
         message instead (`_on_message`). Called after "✅ Done" is sent, on the gateway loop.
         `inject_message` queues one agent turn in that chat (in this plugin's own profile); it needs
         `allow_gateway_injection` and only works inside the gateway. If Hermes refuses or fails, the chat gets
-        "⚠️ then-action failed: <reason>". See `docs/user-guide.md` ("Follow-up actions").
+        "⚠️ then-action failed: <reason>". See `docs/user-guide.md` ("Then-actions").
         """
         if not snooze.then:
             return

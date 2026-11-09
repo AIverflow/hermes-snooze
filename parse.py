@@ -1,7 +1,7 @@
 """Turn the text after ``/snooze`` into a ``Spec`` (or a ``ParseError``).
 
 Pure module: standard library only, no Hermes imports. The grammar is
-documented in `docs/user-guide.md` ("Create a reminder"). ``parse`` returns the error
+documented in `docs/user-guide.md` ("Create a snooze"). ``parse`` returns the error
 instead of raising it.
 """
 
@@ -15,6 +15,12 @@ MIN_DURATION = timedelta(minutes=1)
 
 _KEYWORDS = frozenset({"at", "in", "every", "until", "ok", "then"})
 _PREPOSITIONS = frozenset({"before", "by", "after", "around", "since", "from", "to"})
+_TIME_CLAUSES = frozenset({"at", "until"})
+_DURATION_CLAUSES = frozenset({"in", "every"})
+# Spoken numbers: only used to word an error, never accepted as a duration.
+_SPOKEN_NUMBERS = frozenset(
+    {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "half"}
+)
 _DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _DAYS = {name: day for day, name in enumerate(_DAY_NAMES)}
 
@@ -218,6 +224,7 @@ class _Clauses:
     until: time | None = None
     confirm: ConfirmRule | None = None
     days: frozenset[int] | None = None
+    start: str = ""  # the `at <time>` / `in <duration>` clause as written, for error messages
 
 
 def _too_short(what: str, example: str) -> ParseError:
@@ -252,6 +259,7 @@ def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
             if moment is None or c.at is not None or c.delay is not None:
                 break
             c.at = moment
+            c.start = f"{words[c.end - 2]} {arg}"
         elif keyword == "until":
             moment = _parse_time(arg)
             if moment is None or c.until is not None:
@@ -274,6 +282,7 @@ def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
                 return _too_short(f"{keyword} {arg}", EXAMPLE_LONG)
             if keyword == "in":
                 c.delay = duration
+                c.start = f"{words[c.end - 2]} {arg}"
             else:
                 c.every = duration
         elif keyword == "ok":
@@ -287,6 +296,62 @@ def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
             break
         c.end -= 2
     return c
+
+
+def _conflicting_start(c: _Clauses, words: list[str], low: list[str]) -> ParseError | None:
+    """An ``at`` clause and an ``in`` clause together: the text left over ends with the other one."""
+    if c.end < 2 or (c.at is None) == (c.delay is None):
+        return None
+    keyword, arg = low[c.end - 2], words[c.end - 1]
+    other = (c.delay is not None and keyword == "at" and _parse_time(arg) is not None) or (
+        c.at is not None and keyword == "in" and parse_duration(arg) is not None
+    )
+    if not other:
+        return None
+    return ParseError(
+        f"Two start times: `{words[c.end - 2]} {arg}` and `{c.start}`. Use only one of `at` or `in`.",
+        EXAMPLE_LONG if c.at is not None else EXAMPLE_IN,
+    )
+
+
+def _shown(parts: list[str], limit: int) -> str:
+    return " ".join(parts[:limit]) + (" ..." if len(parts) > limit else "")
+
+
+def _diagnose_tail(words: list[str], low: list[str], end: int) -> ParseError | None:
+    """Explain why no start clause was read from ``words[:end]``, when a clause keyword shows the cause.
+
+    Looks at the last ``at``, ``in``, ``every`` or ``until`` that has something after it. Returns None when
+    the words give no sign of a clause, so the caller reports the generic missing start.
+    """
+    for j in range(end - 1, -1, -1):
+        keyword = low[j]
+        if keyword not in _TIME_CLAUSES and keyword not in _DURATION_CLAUSES:
+            continue
+        is_time = keyword in _TIME_CLAUSES
+        example = EXAMPLE_IN if keyword == "in" else EXAMPLE_LONG
+        tail = words[j + 1 : end]
+        if not tail:
+            return ParseError(f"`{words[j]}` needs a {'time' if is_time else 'duration'} after it.", example)
+        arg = tail[0]
+        valid = _parse_time(arg) is not None if is_time else parse_duration(arg) is not None
+        if valid:
+            if len(tail) > 1:
+                return ParseError(
+                    f"Unrecognized words after `{words[j]} {arg}`: `{_shown(tail[1:], 5)}`. "
+                    "Clauses must come last; remove these words or move them before the clauses.",
+                    example,
+                )
+            continue
+        if is_time and any(ch.isdigit() for ch in arg):
+            return ParseError(f"`{words[j]} {arg}` is not a valid time. Use a form like 4pm or 16:00.", example)
+        if not is_time and (keyword == "every" or any(ch.isdigit() for ch in arg) or arg.casefold() in _SPOKEN_NUMBERS):
+            return ParseError(
+                f"`{words[j]} {_shown(tail, 3)}` is not a valid duration. "
+                "Use digits with a unit, like 10m, 1h30m or 2 hours.",
+                example,
+            )
+    return None
 
 
 def _read_short_form(c: _Clauses, words: list[str], low: list[str]) -> ParseError | None:
@@ -349,6 +414,9 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
     c = _read_clauses(words, low)
     if isinstance(c, ParseError):
         return c
+    conflict = _conflicting_start(c, words, low)
+    if conflict:
+        return conflict
     if c.days is not None and c.delay is not None:
         return ParseError("A recurring snooze needs `at <time>`, not `in`.", EXAMPLE_RECURRING)
     if c.at is None and c.delay is None:
@@ -360,7 +428,9 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
     if not what:
         return ParseError("Missing the reminder text.", EXAMPLE_LONG)
     if c.at is None and c.delay is None:
-        return ParseError("Missing when to start: add `at <time>` or `in <duration>`.", EXAMPLE_LONG)
+        return _diagnose_tail(words, low, c.end) or ParseError(
+            "Missing when to start: add `at <time>` or `in <duration>`.", EXAMPLE_LONG
+        )
 
     if c.delay is not None:
         first_at = now_utc + c.delay
