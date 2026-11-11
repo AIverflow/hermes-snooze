@@ -15,7 +15,7 @@ Choose one of `at` or `in`; parentheses and brackets are notation, not text to t
 | Clause | Meaning |
 |---|---|
 | `at <time>` | First reminder at a time of day. If that time has passed, it means tomorrow. |
-| `in <duration>` | First reminder after a delay. Use either `at` or `in`. |
+| `in <duration>` | First reminder after a delay. |
 | `every <duration>` | Interval between reminders. Defaults to 10 minutes. |
 | `until <time>` | End time: the first such time after the first reminder. Without `until`, `cap_minutes` sets it. See [When a snooze stops](#when-a-snooze-stops). |
 | `daily` / `everyday` | Start a new occurrence every day (the two words are the same). |
@@ -135,7 +135,7 @@ Matching ignores case, extra spaces, punctuation, emoji skin tones and common ch
 
 For a choice, every reminder shows numbered options; reply with the number or option text. The selected option word is passed to the then-action. `/snooze ok <id>` cannot answer a choice; reply in the chat instead. On a recurring snooze, `later` delays only today's occurrence; it does not move the next scheduled day. A `later` that goes past the next scheduled time replaces that next occurrence: `later 25h` on a daily 08:00 snooze means no reminder at 08:00 tomorrow.
 
-A reply to a snooze's latest reminder message selects that snooze. Any other message, including a reply to an older message, selects the active snooze that sent a reminder most recently. A reaction counts only on the latest reminder message. Slash commands continue to Hermes and are not treated as answers. A whole-message `yes` starts the newest snooze waiting for setup confirmation.
+A reply to a snooze's latest reminder message selects that snooze. Any other message, including a reply to an older message, selects the active snooze that sent a reminder most recently. Slash commands continue to Hermes and are not treated as answers. A whole-message `yes` starts the newest snooze waiting for setup confirmation.
 
 Only replies from the chat the reminder was sent to count, and from its user when the snooze has one. For a home channel with no known user, any user Hermes authorizes in that chat can answer. Reactions do not carry a user ID, so reaction confirmation is accepted only for emoji rules in private chats and only on the latest reminder message.
 
@@ -167,7 +167,7 @@ Use `--timeout SECONDS` with `--wait` to stop waiting after that many seconds; `
 
 Quote the snooze text because `|` is a shell pipe. On success, `add` prints the ID on stdout and the creation summary on stderr, then exits 0. If the gateway is not running for the profile, the summary warns that the reminder will not be sent. Parse, target and store errors go to stderr and exit 2. `status` prints the state and, when present, the answer; it exits 0 for a known ID and 2 for an invalid or unknown ID.
 
-With `--wait`, exit codes are `0` for answered, `2` for a parse/store error or recurring snooze, `3` for missed, `4` for cancelled, `5` for timeout, and `130` if interrupted with Ctrl-C. An answered snooze prints its answer on stdout (an empty line when there is no answer).
+With `--wait`, exit codes are `0` for answered, `2` for an error or a recurring snooze, `3` for missed, `4` for cancelled, `5` for timeout, and `130` if interrupted with Ctrl-C.
 
 ## Then-actions
 
@@ -185,8 +185,6 @@ plugins:
 From CLI or Desktop, `/snooze ok` confirms the snooze but does not run its then-action. If Hermes refuses the then-action, the snooze remains done and the chat displays the failure. The agent's normal tool approval rules still apply.
 
 ## Setup and configuration
-
-For installation and gateway startup, see the [README](../README.md).
 
 Plugin settings go under `plugins.entries.snooze.settings` in the active profile's `config.yaml`. The default profile uses `~/.hermes/config.yaml`; a named profile uses `~/.hermes/profiles/<name>/config.yaml`:
 
@@ -219,13 +217,13 @@ Where a new snooze goes, first match wins:
 | 1 | The text has `via <platform>` | That platform's home channel. |
 | 2 | `notification_platform` is `telegram` or `discord` | That platform's home channel. |
 | 3 | A chat command, or the agent tool in a chat | That chat. |
-| 4 | The CLI or no chat | The only home channel. If several platforms have one, Snooze refuses until you run `hermes snooze platform telegram\|discord` or add `via <platform>`. |
+| 4 | The CLI or no chat | The only home channel. If several platforms have one, Snooze refuses, nothing is set, and the reply shows how to pick one: `/snooze platform telegram` (or `hermes snooze platform telegram` in a terminal), or add `via <platform>`. |
 
-When several platforms have a home channel, `/snooze` alone shows the default platform and the `via` hint, and `/snooze list` names each snooze's platform.
+When several platforms have a home channel, `/snooze` alone adds a line saying where a reminder typed from here goes (or that there is no default yet), and `/snooze list` names each snooze's platform.
 
 ## Agent tool
 
-The agent can create snoozes with `snooze_create`. It requires `text` and `first_at` (ISO 8601 in local time); `every`, `until`, `recurrence`, `platform` (like `via`), `confirm`, and `then` are optional. `recurrence` accepts `daily`, `weekdays`, or day lists and ranges. `confirm` accepts `ok`, a word, emoji, `any`, `contains:<word>`, or a `|`-separated choice. Its argument details live in the tool schema in `commands.py`; its response uses the same summary shown for a chat command.
+The agent can create snoozes with `snooze_create`. It requires `text` and `first_at` (ISO 8601 in local time); `every`, `until`, `recurrence`, `platform` (like `via`), `confirm`, and `then` are optional. `recurrence` accepts `daily` (or `everyday`), `weekdays`, or day lists and ranges. `confirm` accepts `ok`, a word, emoji, `any`, `contains:<word>`, or a `|`-separated choice. Its argument details live in the tool schema in `commands.py`; its response uses the same summary shown for a chat command.
 
 ## Lifecycle and stored data
 
@@ -237,7 +235,7 @@ The agent can create snoozes with `snooze_create`. It requires `text` and `first
 | `missed` | Setup was not confirmed in time, or the end time or a cap was reached without an answer. |
 | `cancelled` | Stopped with `/snooze cancel`. |
 
-A recurring snooze returns to `active` after each answer or miss. Its stored `answer` is the latest choice word or free-text answer, `days` stores the recurrence days, and `span` stores the daily reminder window; only `/snooze cancel <id>` ends the series.
+A recurring snooze returns to `active` after each answer or miss. Its stored `answer` is the latest choice word or free-text answer, `days` stores the recurrence days, and `span` stores the length of each occurrence's reminder window; only `/snooze cancel <id>` ends the series.
 
 Snoozes are stored per profile in the plugin data directory. `snoozes.json` contains records with UTC ISO 8601 timestamps and is updated atomically. `snoozes.lock` protects changes to the data file; `sender.lock` ensures only one process sends reminders at a time.
 

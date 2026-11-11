@@ -120,7 +120,7 @@ class GatewayWarningTest(unittest.TestCase):
             schedule=Schedule(first_at=NOW.isoformat(), every=10, until=(NOW + timedelta(hours=1)).isoformat()),
             confirm={"kind": "ok", "value": ""},
         )
-        return echo.render_echo(sn, NOW, "this chat", False, 10, timedelta(minutes=10), **kw)
+        return echo.render_echo(sn, NOW, "this chat", 10, timedelta(minutes=10), **kw)
 
     def test_warning_is_the_last_line_when_the_gateway_is_off(self):
         self.assertEqual(self.render(gateway_off=True).splitlines()[-1], echo.GATEWAY_OFF_WARNING)
@@ -140,14 +140,14 @@ class GatewayWarningTest(unittest.TestCase):
             schedule=Schedule(first_at=NOW.isoformat()),
             confirm={"kind": "choice", "value": "asian|french|italian"},
         )
-        text = echo.render_echo(sn, NOW, "this chat", False, 10, timedelta(minutes=10))
+        text = echo.render_echo(sn, NOW, "this chat", 10, timedelta(minutes=10))
         self.assertIn('Stop it:  reply with one of: 1 asian | 2 french | 3 italian | "later 30" to push it back', text)
         self.assertIn("Answer in chat: reply with an option", text)
         self.assertNotIn("/snooze ok 1", text)
 
 
 class StartStateTest(unittest.TestCase):
-    def render(self, state, **kw):
+    def render(self, state, where="this chat"):
         sn = Snooze(
             id=3,
             text="Stretch",
@@ -157,7 +157,7 @@ class StartStateTest(unittest.TestCase):
             confirm={"kind": "ok", "value": ""},
             state=state,
         )
-        return echo.render_echo(sn, NOW, "this chat", False, 10, timedelta(minutes=10), **kw)
+        return echo.render_echo(sn, NOW, where, 10, timedelta(minutes=10))
 
     def test_started_has_no_yes_line_and_undo_is_last(self):
         lines = self.render(ACTIVE).splitlines()
@@ -165,12 +165,12 @@ class StartStateTest(unittest.TestCase):
         self.assertEqual(lines[-1], "Undo:     /snooze cancel 3")
 
     def test_pending_in_chat_has_one_reply_yes_line(self):
-        lines = self.render(PENDING, from_chat=True).splitlines()
+        lines = self.render(PENDING).splitlines()
         self.assertEqual(lines[-2], "Undo:     /snooze cancel 3")
         self.assertEqual(lines[-1], "Waiting:  not started. Reply `yes` within 10 min.")
 
     def test_pending_in_cli_says_type_the_command(self):
-        lines = self.render(PENDING, from_chat=False).splitlines()
+        lines = self.render(PENDING, where="home channel").splitlines()
         self.assertEqual(
             lines[-1],
             "Waiting:  not started. Type `/snooze yes 3` within 10 min (a bare `yes` only works in chat apps).",

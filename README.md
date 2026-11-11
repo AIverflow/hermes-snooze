@@ -11,10 +11,8 @@ hermes-snooze sends its reminders through a messaging platform, so **Hermes need
 | Platform | Status |
 |---|---|
 | Telegram | ✅ Tested (private chat) |
-| Discord | 🔧 In progress |
+| Discord | ✅ Tested |
 | Other Hermes platforms (Slack, Signal, …) | ❔ Untested, may work |
-
-WhatsApp Cloud API is not supported.
 
 ## Install
 
@@ -89,8 +87,6 @@ Each reminder lists the options. Reply with an option or its number: the agent g
 → reply: ship | hold | later   (or 1 | 2)
 ```
 
-For every clause and rule, see the [user guide](docs/user-guide.md#create-a-snooze).
-
 ## Keywords
 
 Type these after `/snooze <what>`, in any order; put `then` last. Details: [user guide](docs/user-guide.md#create-a-snooze).
@@ -106,7 +102,24 @@ Type these after `/snooze <what>`, in any order; put `then` last. Details: [user
 | `via <platform>` | Send to that platform's home channel (`telegram` or `discord`) | `via discord` |
 | `ok <answer>` | Confirm with a word, an emoji, or choices (`a\|b\|c`); the guide lists the rest | `ok done`, `ok ✅`, `ok merge\|review` |
 | `then <action>` | The agent does this after you confirm | `then run ./deploy.sh` |
-| `later [N]` | Reply in the chat to postpone N minutes (default: the `every` interval) | `later 15` |
+
+Reply `later` (or `later 15`) to a reminder to postpone it.
+
+## Snooze or Hermes cron?
+
+Hermes cron runs a job on a schedule. Snooze reminds you until you answer.
+
+| | Hermes cron | Snooze |
+|---|---|---|
+| Repeats | Every N minutes, forever or N times | Every N minutes, until you answer or until a set time |
+| Stops when | You run `/cron remove <id>` | You reply `Ok`, a word, an emoji or a reaction |
+| Postpone | Edit the job | Reply `later` |
+| Choices | Not built in | `ok merge\|review`: your answer is the choice |
+| After the answer | A continuable job passes your reply to the agent, which decides | `then …` gives the agent a set next step |
+| LLM calls per message | 0 in no-agent mode (a script file per job), else 1 per run | 0 |
+| Where it sends | About 20 platforms, or several at once | One chat per snooze: Telegram and Discord tested, other Hermes platforms untested |
+
+Use cron for reports, scripts and agent tasks on a schedule. Use Snooze when someone must answer.
 
 ## Limits
 

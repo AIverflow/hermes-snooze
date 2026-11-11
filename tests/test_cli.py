@@ -156,6 +156,8 @@ class CliTest(unittest.TestCase):
             self.parser.parse_args(["add", "--help"])
         for line in commands.HELP.splitlines():
             self.assertIn(line, out.getvalue())
+        self.assertNotIn("github.com", out.getvalue())
+        self.assertIn("More keywords and examples: see the user guide (docs/user-guide.md).", out.getvalue())
 
     def test_status_prints_state_and_answer_when_present(self):
         record, _message = self.commands.create_from_cli("Dinner in 1m ok asian|french")
@@ -175,8 +177,8 @@ class CliTest(unittest.TestCase):
 
         code, stdout, stderr = self.run_cli("add", "Backup failed in 1m")
         self.assertEqual((code, stdout), (2, ""))
-        self.assertIn("hermes snooze platform telegram|discord", stderr)
-        self.assertIn("via <platform>", stderr)
+        self.assertIn("Set a default once:  hermes snooze platform telegram", stderr)
+        self.assertIn('Or for this one:     hermes snooze add "Backup failed in 1m via telegram"', stderr)
         self.assertEqual(Store(self.data_dir).load(), [])
 
         self.assertEqual(self.run_cli("platform", "TELEGRAM")[0], 0)
@@ -188,9 +190,16 @@ class CliTest(unittest.TestCase):
         code, stdout, _ = self.run_cli("platform")
         self.assertEqual(code, 0)
         self.assertIn("Default platform: the chat where you type (source)", stdout)
+        self.assertIn("Change: hermes snooze platform telegram | discord | source", stdout)
 
         self.assertEqual(
-            self.run_cli("platform", "source"), (0, "✅ Default platform: the chat where you type (source)\n", "")
+            self.run_cli("platform", "source"),
+            (
+                0,
+                "✅ Reminders go to the chat where you type (source). "
+                "Change: hermes snooze platform telegram|discord\n",
+                "",
+            ),
         )
 
     def test_platform_without_a_home_channel_exits_two(self):

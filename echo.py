@@ -8,6 +8,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .store import PENDING, Snooze
 
+# Where a snooze goes: the chat the command came from, or the profile's home channel.
+WHERE_CHAT = "this chat"
+WHERE_HOME = "home channel"
+
 PLATFORM_LABELS = {"whatsapp": "WhatsApp", "whatsapp_cloud": "WhatsApp Cloud", "sms": "SMS"}
 
 # `/snooze test`: a snooze flagged `test` (see `docs/user-guide.md`, "Commands").
@@ -107,12 +111,23 @@ def default_platform_text(setting: str) -> str:
     return f"{platform_label(setting)} (home channel)"
 
 
+def choice_options(rule: Any) -> list[str]:
+    """The options of a choice confirm rule, in order; [] for any other rule."""
+    if not isinstance(rule, dict) or rule.get("kind") != "choice":
+        return []
+    return [option.strip() for option in str(rule.get("value", "")).split("|") if option.strip()]
+
+
+def numbered(options: list[str]) -> str:
+    """["a", "b"] -> "1 a | 2 b"."""
+    return " | ".join(f"{index} {option}" for index, option in enumerate(options, 1))
+
+
 def _stop_text(rule: Any) -> str:
     kind = rule.get("kind") if isinstance(rule, dict) else None
     value = rule.get("value", "") if isinstance(rule, dict) else ""
     if kind == "choice":
-        options = [option.strip() for option in str(value).split("|") if option.strip()]
-        return "reply with one of: " + " | ".join(f"{index} {option}" for index, option in enumerate(options, 1))
+        return "reply with one of: " + numbered(choice_options(rule))
     if kind == "word":
         return f'reply "{value}"'
     if kind == "contains":
@@ -128,16 +143,14 @@ def render_echo(
     snooze: Snooze,
     now: datetime,
     where: str,
-    capped: bool,
     cap_reminders: int,
     yes_window: timedelta,
     gateway_off: bool = False,
-    from_chat: bool = False,
 ) -> str:
     """What the user sees after creating a snooze: local times, where, how to stop, how to undo.
 
-    A pending snooze gets one "Waiting" line. `from_chat` picks the wording: a chat app can send a bare `yes`,
-    the CLI and Desktop cannot, so they get `/snooze yes <id>`.
+    A pending snooze gets one "Waiting" line. In its own chat (`where` is WHERE_CHAT) the user can send a
+    bare `yes`; elsewhere (CLI, Desktop, home channel) the line gives `/snooze yes <id>`.
     """
     sched = snooze.schedule
     first = from_iso(sched.first_at)
@@ -165,14 +178,14 @@ def render_echo(
     if snooze.then:
         lines.append(f'Then:     the agent will "{snooze.then}" and tell you the result')
     lines.append(f"Where:    {platform_label(snooze.target.platform)} ({where})")
-    if isinstance(snooze.confirm, dict) and snooze.confirm.get("kind") == "choice":
+    if choice_options(snooze.confirm):
         lines.append("Answer in chat: reply with an option")
     else:
         lines.append(f'If "Ok" does not match: /snooze ok {snooze.id}')
     lines.append(f"Undo:     /snooze cancel {snooze.id}")
     if pending:
         minutes = format_minutes(minutes_value(yes_window))
-        if from_chat:
+        if where == WHERE_CHAT:
             lines.append(f"Waiting:  not started. Reply `yes` within {minutes}.")
         else:
             lines.append(
@@ -210,17 +223,14 @@ def _ordinal(n: int) -> str:
 def reminder_text(snooze: Snooze, late_by: timedelta | None = None) -> str:
     """Every reminder shows its snooze id; the first one says how to answer."""
     count = snooze.sent_count + 1
-    is_choice = isinstance(snooze.confirm, dict) and snooze.confirm.get("kind") == "choice"
-    options = []
-    if is_choice:
-        options = [option.strip() for option in str(snooze.confirm.get("value", "")).split("|") if option.strip()]
-    instruction = f"reply 1-{len(options)}" if is_choice else _stop_text(snooze.confirm)
+    options = choice_options(snooze.confirm)
+    instruction = f"reply 1-{len(options)}" if options else _stop_text(snooze.confirm)
     tail = f"  ({instruction} | later)" if count == 1 else f" ({_ordinal(count)})"
     text = f"🔔 Snooze #{snooze.id}: {snooze.text}{tail}"
     if late_by is not None:
         text += f"\n⏰ late by {format_minutes(round(late_by.total_seconds() / 60))}"
-    if is_choice:
-        text += "\n" + " | ".join(f"{index} {option}" for index, option in enumerate(options, 1))
+    if options:
+        text += "\n" + numbered(options)
     return text
 
 

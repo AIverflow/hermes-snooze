@@ -30,13 +30,14 @@ _SPOKEN_NUMBERS = frozenset(
 _DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _DAYS = {name: day for day, name in enumerate(_DAY_NAMES)} | {name[:3]: day for day, name in enumerate(_DAY_NAMES)}
 
+# Recurrence words and their days (0 is Monday). The `snooze_create` tool accepts them too.
+RECURRENCE_WORDS = {"daily": frozenset(range(7)), "everyday": frozenset(range(7)), "weekdays": frozenset(range(5))}
+
 _TIME_RE = re.compile(r"^(\d{1,2})(?::(\d{2}))?(am|pm)?$")
 # `\s*` lets a duration be one word ("2m") or words joined by `_join_number_units` ("1 h 30 min").
-_DURATION_RE = re.compile(
-    r"^(?:\d+\s*(?:hours|hour|hrs|hr|h|minutes|minute|mins|min|m|"
-    r"seconds|second|secs|sec|s)\s*)+$"
-)
-_DURATION_PART_RE = re.compile(r"(\d+)\s*(hours|hour|hrs|hr|h|minutes|minute|mins|min|m|seconds|second|secs|sec|s)")
+_UNITS = "hours|hour|hrs|hr|h|minutes|minute|mins|min|m|seconds|second|secs|sec|s"
+_DURATION_RE = re.compile(rf"^(?:\d+\s*(?:{_UNITS})\s*)+$")
+_DURATION_PART_RE = re.compile(rf"(\d+)\s*({_UNITS})")
 _UNIT_SECONDS = {
     "s": 1,
     "sec": 1,
@@ -260,10 +261,10 @@ def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
     """
     c = _Clauses(end=len(words))
     while c.end > 0:
-        if low[c.end - 1] in ("daily", "everyday", "weekdays"):
+        if low[c.end - 1] in RECURRENCE_WORDS:
             if c.days is not None or c.on_day is not None:
                 break
-            c.days = frozenset(range(5)) if low[c.end - 1] == "weekdays" else frozenset(range(7))
+            c.days = RECURRENCE_WORDS[low[c.end - 1]]
             c.end -= 1
             continue
         if low[c.end - 1] == "ok":

@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import echo
 from . import parse as _parse
+from .echo import WHERE_CHAT, WHERE_HOME
 from .parse import ConfirmRule, ParseError, Spec
 from .schedule import PENDING_TIMEOUT, apply_later, is_pending_expired, is_recurring, pending_deadline, rearm
 from .store import ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, Store, StoreError, Target, Txn
@@ -42,9 +43,6 @@ DEFAULT_EVERY = timedelta(minutes=10)  # used when the text gives no `every`
 
 DEFAULT_VALIDATE_SETUP = False
 
-# Where a snooze goes: the chat the command came from, or the profile's home channel.
-WHERE_CHAT = "this chat"
-WHERE_HOME = "home channel"
 DEFAULT_CAP_MINUTES = 120
 DEFAULT_CAP_REMINDERS = 10
 
@@ -91,8 +89,8 @@ HELP = "\n".join(
         f"1. Simple:  {EXAMPLE_SIMPLE}   → reply: Ok | later",
         f"2. Action:  {EXAMPLE_ACTION}   → reply: Ok | later, then the agent acts",
         f"3. Choice:  {EXAMPLE_CHOICE}   → reply: merge | review | later (1 | 2 also work)",
-        "All keywords: https://github.com/AIverflow/hermes-snooze/blob/main/docs/user-guide.md#create-a-snooze",
         "Other commands: list | ok [id] | later [minutes] [id] | cancel <id> | yes [id] | test | platform [name]",
+        "More keywords and examples: see the user guide (docs/user-guide.md).",
     ]
 )
 
@@ -103,11 +101,8 @@ NO_TARGET_TEXT = (
     "or set a home channel for the profile. Nothing was set."
 )
 
-CHOOSE_PLATFORM_TEXT = (
-    "Several platforms have a home channel and there is no chat here to answer in. "
-    "Choose one with `hermes snooze platform telegram|discord`, or add `via <platform>` to the text. "
-    "Nothing was set."
-)
+# Where a command came from, for the texts that name the command to type next.
+FROM_CHAT, FROM_TERMINAL, FROM_TOOL = "chat", "terminal", "tool"
 
 OUT_OF_RANGE_TEXT = "⚠️ A date or number is out of range. Nothing was set."
 
@@ -187,8 +182,7 @@ def not_started_message(snooze: Snooze) -> str:
 def confirm_snooze(snooze: Snooze, now: datetime, answer: str | None = None) -> str:
     """The user confirmed a running snooze: finish its occurrence or re-arm its series."""
     snooze.answer = answer
-    choice = isinstance(snooze.confirm, dict) and snooze.confirm.get("kind") == "choice"
-    answer_text = f" → {answer}" if answer and choice else ""
+    answer_text = f" → {answer}" if answer and echo.choice_options(snooze.confirm) else ""
     if is_recurring(snooze):
         next_at = rearm(snooze, now)
         when = echo.format_when(next_at, snooze.schedule.tz, now)
@@ -338,6 +332,11 @@ def hermes_gateway_running() -> bool | None:
     return bool(liveness.running)
 
 
+def platform_name(platform: Any) -> str:
+    """A Hermes platform (enum or text) as a lower-case name."""
+    return str(getattr(platform, "value", platform) or "").lower()
+
+
 def _hermes_homes() -> list[Target]:
     """The home channel of every chat platform that has one, in config order."""
     homes = []
@@ -347,7 +346,7 @@ def _hermes_homes() -> list[Target]:
         config = load_gateway_config()
         for candidate, platform_config in config.platforms.items():
             home = getattr(platform_config, "home_channel", None)
-            name = str(getattr(candidate, "value", candidate)).lower()
+            name = platform_name(candidate)
             if home is None or name in NON_CHAT_PLATFORMS:
                 continue
             chat_id = str(home.chat_id)
@@ -375,8 +374,7 @@ def target_from_source(source: Any) -> Target | None:
     """The chat a gateway command came from, or None for the CLI / TUI / Desktop (no source)."""
     if source is None:
         return None
-    platform = getattr(source, "platform", None)
-    name = str(getattr(platform, "value", platform) or "").lower()
+    name = platform_name(getattr(source, "platform", None))
     chat_id = getattr(source, "chat_id", None)
     if name in NON_CHAT_PLATFORMS or chat_id in (None, ""):
         return None
@@ -441,7 +439,7 @@ class Commands:
 
     def _dispatch(self, text: str, source: Any) -> str:
         if not text:
-            return self._help()
+            return self._help(source)
         name, *args = text.split()
         name = name.lower()
         if name == "test" and not args:
@@ -458,18 +456,34 @@ class Commands:
             if name in SUBCOMMANDS:
                 return USAGE[name]
             return f"⚠️ {spec.message}\nExample: {spec.example}\nNothing was set."
-        return self._create_from_spec(spec, *self._command_target(source, spec.platform), via=spec.platform)
+        target, where = self._target(spec.platform, target_from_source(source))
+        if target is None:
+            return self._no_target_text(spec.platform, FROM_CHAT, text)
+        record, settings, now = self._add(spec, target)
+        return self._echo(record, now, where, settings)
 
     def _several_platforms(self) -> bool:
         """Whether at least two chat platforms have a home channel: the user then has a platform to choose."""
         return len(self._home_platforms()) >= 2
 
-    def _help(self) -> str:
-        if not self._several_platforms():
+    def _help(self, source: Any) -> str:
+        """HELP; with several platforms, a line before the last one says where a snooze typed here goes."""
+        platforms = self._home_platforms()
+        if len(platforms) < 2:
             return HELP
-        default = echo.default_platform_text(read_settings(self._ctx).notification_platform)
-        hints = " or ".join(f'"via {name}"' for name in _parse.PLATFORMS)
-        return f"{HELP}\nDefault platform: {default}. Per snooze: add {hints}."
+        target, where = self._target(None, target_from_source(source))
+        if target is None:
+            hints = " or ".join(f'"via {name}"' for name in platforms)
+            line = (
+                f"Reminders from here: no default yet. Set one: /snooze platform {'|'.join(platforms)}, "
+                f"or add {hints} to the text."
+            )
+        else:
+            name = echo.platform_label(target.platform)
+            place = f"this {name} chat" if where == WHERE_CHAT else f"{name} (home channel)"
+            line = f"Reminders from here go to: {place}. Change: /snooze platform {'|'.join([*platforms, 'source'])}"
+        head, guide = HELP.rsplit("\n", 1)
+        return f"{head}\n{line}\n{guide}"
 
     def _parse(self, text: str) -> Spec | ParseError:
         return _parse.parse(text, self._now(), read_settings(self._ctx).timezone)
@@ -479,36 +493,29 @@ class Commands:
 
     # -- create ----------------------------------------------------------------
 
-    def _command_target(self, source: Any, via: str | None = None) -> tuple[Target | None, str]:
-        """Where a command's snooze goes: the `via` platform's home channel, else per `notification_platform`."""
-        if via:
-            return self._home_target(via), WHERE_HOME
-        platform = read_settings(self._ctx).notification_platform
+    def _target(self, via: str | None, chat: Target | None) -> tuple[Target | None, str]:
+        """Where a new snooze goes: the `via` platform, else `notification_platform`, else `chat`, else the only home.
+
+        None when no home channel fits, or when several platforms have one and there is no chat (the user must choose).
+        """
+        platform = via or read_settings(self._ctx).notification_platform
         if platform != "source":
             return self._home_target(platform), WHERE_HOME
-        target = target_from_source(source)
-        if target is not None:
-            return target, WHERE_CHAT
-        return self._only_home(), WHERE_HOME
+        if chat is not None:
+            return chat, WHERE_CHAT
+        return (None if self._several_platforms() else self._home_target()), WHERE_HOME
 
-    def _only_home(self) -> Target | None:
-        """The home channel for a snooze with no chat; None if several platforms have one (the user must choose)."""
-        return None if self._several_platforms() else self._home_target()
-
-    def _tool_target(self, via: str | None = None) -> tuple[Target | None, str]:
-        if via:
-            return self._home_target(via), WHERE_HOME
-        platform = read_settings(self._ctx).notification_platform
-        if platform != "source":
-            return self._home_target(platform), WHERE_HOME
+    def _session_chat(self) -> Target | None:
+        """The chat of the current agent session (tool, CLI), or None."""
         platform = self._session_env("HERMES_SESSION_PLATFORM").strip().lower()
         chat_id = self._session_env("HERMES_SESSION_CHAT_ID").strip()
-        if platform not in NON_CHAT_PLATFORMS and chat_id:
-            user_id = self._session_env("HERMES_SESSION_USER_ID").strip()
-            return Target(platform=platform, chat_id=chat_id, user_id=user_id or None), WHERE_CHAT
-        return self._only_home(), WHERE_HOME
+        if platform in NON_CHAT_PLATFORMS or not chat_id:
+            return None
+        user_id = self._session_env("HERMES_SESSION_USER_ID").strip()
+        return Target(platform=platform, chat_id=chat_id, user_id=user_id or None)
 
-    def _no_target_text(self, via: str | None = None) -> str:
+    def _no_target_text(self, via: str | None = None, origin: str = FROM_CHAT, text: str | None = None) -> str:
+        """Why a snooze has no target. `origin` and `text` (None: none to repeat) shape the choose-a-platform reply."""
         if via:
             name = via.title()
             return (
@@ -522,16 +529,36 @@ class Commands:
                 f"No {name} home channel is configured for this profile. "
                 f"Set one with /sethome on {name} or choose another notification_platform. Nothing was set."
             )
-        return CHOOSE_PLATFORM_TEXT if self._several_platforms() else NO_TARGET_TEXT
+        return self._choose_platform_text(origin, text) if self._several_platforms() else NO_TARGET_TEXT
 
-    def _add(self, spec: Spec, target: Target, *, test: bool = False) -> tuple[Snooze, bool, Settings, datetime]:
-        """Store a new snooze for `spec`. Returns (record, whether its stop time is the cap, settings, now).
+    def _choose_platform_text(self, origin: str, text: str | None) -> str:
+        """Several platforms have a home channel and the snooze came from no chat: say how to choose one."""
+        platforms = self._home_platforms()
+        first = platforms[0]
+        if origin == FROM_TOOL:
+            return (
+                f"Several platforms have a home channel ({', '.join(platforms)}) and there is no chat. "
+                "Ask the user which platform to use, then call snooze_create again with `platform`. Nothing was set."
+            )
+        names = [echo.platform_label(name) for name in platforms]
+        setup = f"{', '.join(names[:-1])} and {names[-1]} are {'both' if len(names) == 2 else 'all'} set up."
+        terminal = origin == FROM_TERMINAL
+        lines = [
+            f"⚠️ Where should reminders go? {setup}",
+            f"Set a default once:  {'hermes snooze' if terminal else '/snooze'} platform {first}",
+        ]
+        if text:
+            this_one = f'hermes snooze add "{text} via {first}"' if terminal else f"/snooze {text} via {first}"
+            lines.append(f"Or for this one:     {this_one}")
+        return "\n".join([*lines, "Nothing was set."])
+
+    def _add(self, spec: Spec, target: Target, *, test: bool = False) -> tuple[Snooze, Settings, datetime]:
+        """Store a new snooze for `spec`. Returns (record, settings, now).
 
         A `test` snooze starts at once: it has no `yes` step.
         """
         settings = read_settings(self._ctx)
         now = self._now()
-        capped = spec.until is None
         until = spec.until or spec.first_at + timedelta(minutes=settings.cap_minutes)
         active = test or not settings.validate_setup
         record = Snooze(
@@ -552,13 +579,7 @@ class Commands:
             next_at=_iso(spec.first_at) if active else None,
             test=test,
         )
-        return self._store().add(record), capped, settings, now
-
-    def _create_from_spec(self, spec: Spec, target: Target | None, where: str, via: str | None = None) -> str:
-        if target is None:
-            return self._no_target_text(via)
-        record, capped, settings, now = self._add(spec, target)
-        return self._echo(record, now, where, capped, settings)
+        return self._store().add(record), settings, now
 
     def create_from_cli(self, text: str) -> tuple[Snooze | None, str]:
         """Create through the CLI using the same parser, target and store path as other entry points."""
@@ -566,32 +587,20 @@ class Commands:
         if isinstance(spec, ParseError):
             return None, f"{spec.message}\nExample: {spec.example}"
 
-        target, where = self._tool_target(spec.platform)
+        target, where = self._target(spec.platform, self._session_chat())
         if target is None:
-            return None, self._no_target_text(spec.platform)
+            return None, self._no_target_text(spec.platform, FROM_TERMINAL, text)
 
         try:
-            record, capped, settings, now = self._add(spec, target)
+            record, settings, now = self._add(spec, target)
         except StoreError as exc:
             return None, str(exc)
-        return record, self._echo(record, now, where, capped, settings)
+        return record, self._echo(record, now, where, settings)
 
-    def _echo(self, record: Snooze, now: datetime, where: str, capped: bool, settings: Settings) -> str:
-        """The echo of a new snooze, plus the warning if no gateway runs for the profile (none if it cannot be told).
-
-        `where` is WHERE_CHAT only when the snooze has a chat of its own (the echo's chat wording depends on it).
-        """
+    def _echo(self, record: Snooze, now: datetime, where: str, settings: Settings) -> str:
+        """The echo of a new snooze, plus the warning if no gateway runs for the profile (none if it cannot be told)."""
         off = self._gateway_running() is False
-        return echo.render_echo(
-            record,
-            now,
-            where,
-            capped,
-            settings.cap_reminders,
-            PENDING_TIMEOUT,
-            gateway_off=off,
-            from_chat=where == WHERE_CHAT,
-        )
+        return echo.render_echo(record, now, where, settings.cap_reminders, PENDING_TIMEOUT, gateway_off=off)
 
     def _create_from_tool(self, args: dict) -> dict:
         settings = read_settings(self._ctx)
@@ -615,12 +624,7 @@ class Commands:
         recurrence = args.get("recurrence")
         if recurrence is not None:
             value = str(recurrence).strip().casefold()
-            if value in ("daily", "everyday"):
-                days = frozenset(range(7))
-            elif value == "weekdays":
-                days = frozenset(range(5))
-            else:
-                days = _parse.parse_days(value)
+            days = _parse.RECURRENCE_WORDS.get(value) or _parse.parse_days(value)
             if days is None:
                 return {"error": "recurrence must be daily, weekdays, or days such as mon,thu or monday-friday."}
 
@@ -665,9 +669,9 @@ class Commands:
         else:
             via = None
 
-        target, where = self._tool_target(via)
+        target, where = self._target(via, self._session_chat())
         if target is None:
-            return {"error": self._no_target_text(via)}
+            return {"error": self._no_target_text(via, FROM_TOOL)}
 
         spec = Spec(
             text=text,
@@ -680,13 +684,13 @@ class Commands:
             days=days,
             platform=via,
         )
-        record, capped, settings, now = self._add(spec, target)
+        record, settings, now = self._add(spec, target)
         started = record.state == ACTIVE
         return {
             "ok": True,
             "id": record.id,
             "state": record.state,
-            "message": self._echo(record, now, where, capped, settings),
+            "message": self._echo(record, now, where, settings),
             "note": (
                 "Show `message` to the user as it is. "
                 + (
@@ -760,18 +764,23 @@ class Commands:
             lines.append(f"#{s.id} {s.text} — {detail}")
         return "\n".join(lines)
 
-    def platform(self, value: str | None) -> tuple[bool, str]:
-        """Show (`value` None) or set the default platform. Returns (whether it worked, the reply)."""
+    def platform(self, value: str | None, terminal: bool = False) -> tuple[bool, str]:
+        """Show (`value` None) or set the default platform. Returns (whether it worked, the reply).
+
+        `terminal`: the reply names the `hermes snooze` command instead of `/snooze`.
+        """
+        command = "hermes snooze" if terminal else "/snooze"
         if value is None:
             current = echo.default_platform_text(read_settings(self._ctx).notification_platform)
-            return True, f"Default platform: {current}. Change: /snooze platform telegram | discord | source"
+            return True, f"Default platform: {current}. Change: {command} platform telegram | discord | source"
         if value != "source" and self._home_target(value) is None:
             return False, self._no_target_text(value)
         try:
             self._ctx.set_config("notification_platform", value)
         except (OSError, ValueError) as exc:
             return False, f"⚠️ Could not save the setting: {exc}"
-        return True, f"✅ Default platform: {echo.default_platform_text(value)}"
+        others = "|".join(name for name in (*_parse.PLATFORMS, "source") if name != value)
+        return True, f"✅ Reminders go to {echo.default_platform_text(value)}. Change: {command} platform {others}"
 
     def _cmd_platform(self, rest: list) -> str | None:
         if len(rest) > 1 or (rest and rest[0].lower() not in (*_parse.PLATFORMS, "source")):
@@ -787,7 +796,7 @@ class Commands:
         The command cannot wait for the reply, so it reports the check it can do now. With no gateway
         nothing would be sent, so no test is made.
         """
-        target, where = self._command_target(source)
+        target, where = self._target(None, target_from_source(source))
         if target is None:
             return self._no_target_text()
         running = self._gateway_running()
@@ -816,10 +825,9 @@ class Commands:
             s, problem = self._select(txn, sid, ACTIVE)
             if problem:
                 return problem
-            if isinstance(s.confirm, dict) and s.confirm.get("kind") == "choice":
-                options = [option.strip() for option in str(s.confirm.get("value", "")).split("|") if option.strip()]
-                choices = " | ".join(f"{index} {option}" for index, option in enumerate(options, 1))
-                return f"#{s.id} needs an answer: reply {choices} in the chat."
+            options = echo.choice_options(s.confirm)
+            if options:
+                return f"#{s.id} needs an answer: reply {echo.numbered(options)} in the chat."
             reply = confirm_snooze(s, self._now())
             if s.then:
                 confirmed.append(dataclasses.replace(s))

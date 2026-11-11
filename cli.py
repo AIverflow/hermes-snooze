@@ -72,7 +72,7 @@ def _handler(commands: Commands, args: argparse.Namespace) -> int:
             if getattr(spec, "days", None):
                 print("--wait does not work with a recurring snooze: use status <id>.", file=sys.stderr)
                 return 2
-        record, message = commands.create_from_cli(" ".join(args.text))
+        record, message = commands.create_from_cli(text)
         if record is None:
             print(message, file=sys.stderr)
             return 2
@@ -92,7 +92,7 @@ def _handler(commands: Commands, args: argparse.Namespace) -> int:
         return 0
 
     if args._snooze_action == "platform":
-        ok, reply = commands.platform(args.value)
+        ok, reply = commands.platform(args.value, terminal=True)
         print(reply, file=sys.stdout if ok else sys.stderr)
         return 0 if ok else 2
 

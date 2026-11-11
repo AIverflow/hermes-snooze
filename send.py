@@ -257,15 +257,6 @@ def _gateway_loop_state() -> tuple[asyncio.AbstractEventLoop | None, str]:
     return loop, ""
 
 
-def gateway_loop() -> asyncio.AbstractEventLoop | None:
-    """The gateway's own event loop if it is up, else None.
-
-    Hermes itself schedules onto it from other threads (gateway/run_plugin_injection.py). It is
-    not necessarily up while `register()` runs: see `start_timer`.
-    """
-    return _gateway_loop_state()[0]
-
-
 class _PendingTimer:
     """Stands in `_timers` while a waiter thread looks for the gateway loop; it quacks like a task.
 

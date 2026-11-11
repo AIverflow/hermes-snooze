@@ -285,6 +285,12 @@ class HelpTest(Base):
         self.assertIn("→ reply: Ok | later", text)
         self.assertIn("→ reply: merge | review | later", text)
 
+    def test_help_ends_with_the_user_guide_line_and_has_no_github_link(self):
+        lines = self.run_cmd("").splitlines()
+        self.assertEqual(lines[-1], "More keywords and examples: see the user guide (docs/user-guide.md).")
+        self.assertTrue(lines[-2].startswith("Other commands:"))
+        self.assertNotIn("github.com", commands.HELP)
+
     def test_help_examples_parse(self):
         for example in self.EXAMPLES:
             with self.subTest(example=example):
@@ -1198,14 +1204,36 @@ class SeveralPlatformsTest(Base):
 
     # the three outputs
 
-    def test_help_shows_the_default_platform_and_via(self):
-        for setting, default in (("source", "the chat where you type (source)"), ("discord", "Discord (home channel)")):
-            with self.subTest(setting=setting):
-                self.ctx.config["notification_platform"] = setting
-                lines = self.run_cmd("").splitlines()
-                self.assertEqual(lines[:-1], commands.HELP.splitlines())
+    def help_lines(self, setting, source):
+        self.ctx.config["notification_platform"] = setting
+        return self.run_cmd("", source=source).splitlines()
+
+    def test_help_says_where_a_telegram_chat_goes(self):
+        lines = self.help_lines("source", telegram_source())
+        self.assertEqual(lines[:-2], commands.HELP.splitlines()[:-1])
+        self.assertEqual(
+            lines[-2],
+            "Reminders from here go to: this Telegram chat. Change: /snooze platform telegram|discord|source",
+        )
+        self.assertEqual(lines[-1], commands.HELP.splitlines()[-1])
+
+    def test_help_says_a_cli_has_no_default_yet(self):
+        lines = self.help_lines("source", None)
+        self.assertEqual(
+            lines[-2],
+            "Reminders from here: no default yet. Set one: /snooze platform telegram|discord, "
+            'or add "via telegram" or "via discord" to the text.',
+        )
+        self.assertEqual(lines[-1], commands.HELP.splitlines()[-1])
+
+    def test_help_says_where_the_setting_sends_it(self):
+        for source in (None, telegram_source()):
+            with self.subTest(source=source):
+                lines = self.help_lines("discord", source)
                 self.assertEqual(
-                    lines[-1], f'Default platform: {default}. Per snooze: add "via telegram" or "via discord".'
+                    lines[-2],
+                    "Reminders from here go to: Discord (home channel). "
+                    "Change: /snooze platform telegram|discord|source",
                 )
 
     def test_help_is_unchanged_with_one_platform(self):
@@ -1213,9 +1241,6 @@ class SeveralPlatformsTest(Base):
         self.assertEqual(self.run_cmd(""), commands.HELP)
         self.platforms = []
         self.assertEqual(self.run_cmd(""), commands.HELP)
-
-    def test_static_help_has_no_default_platform_line(self):
-        self.assertNotIn("Default platform", commands.HELP)
 
     def test_echo_names_the_platform_for_a_chat_and_a_home(self):
         self.assertIn("Where:    Telegram (this chat)", self.run_cmd("Wake up at 4pm", source=telegram_source()))
@@ -1241,22 +1266,50 @@ class SeveralPlatformsTest(Base):
     def test_cli_is_refused_with_both_ways_to_choose(self):
         record, message = self.cmds.create_from_cli("Wake up at 4pm")
         self.assertIsNone(record)
-        self.assertIn("hermes snooze platform telegram|discord", message)
-        self.assertIn("via <platform>", message)
+        self.assertIn("hermes snooze platform telegram", message)
+        self.assertIn('hermes snooze add "Wake up at 4pm via telegram"', message)
         self.assertEqual(self.store.load(), [])
 
-    def test_command_without_a_chat_is_refused(self):
+    def test_command_without_a_chat_is_refused_with_slash_commands(self):
         reply = self.run_cmd("Wake up at 4pm", source=None)
-        self.assertEqual(reply, commands.CHOOSE_PLATFORM_TEXT)
+        self.assertEqual(
+            reply,
+            "⚠️ Where should reminders go? Telegram and Discord are both set up.\n"
+            "Set a default once:  /snooze platform telegram\n"
+            "Or for this one:     /snooze Wake up at 4pm via telegram\n"
+            "Nothing was set.",
+        )
         self.assertEqual(self.store.load(), [])
 
-    def test_test_command_without_a_chat_is_refused(self):
-        self.assertEqual(self.run_cmd("test", source=None), commands.CHOOSE_PLATFORM_TEXT)
+    def test_refusal_names_the_platforms_that_have_a_home(self):
+        self.platforms = ["discord", "telegram", "slack"]
+        reply = self.run_cmd("Wake up at 4pm", source=None)
+        self.assertIn("Discord, Telegram and Slack are all set up.", reply)
+        self.assertIn("/snooze platform discord\n", reply)
+
+    def test_cli_refusal_names_terminal_commands(self):
+        _, message = self.cmds.create_from_cli("Wake up at 4pm")
+        self.assertEqual(
+            message,
+            "⚠️ Where should reminders go? Telegram and Discord are both set up.\n"
+            "Set a default once:  hermes snooze platform telegram\n"
+            'Or for this one:     hermes snooze add "Wake up at 4pm via telegram"\n'
+            "Nothing was set.",
+        )
+
+    def test_test_command_without_a_chat_is_refused_without_a_text(self):
+        reply = self.run_cmd("test", source=None)
+        self.assertIn("Set a default once:  /snooze platform telegram\nNothing was set.", reply)
+        self.assertNotIn("Or for this one", reply)
         self.assertEqual(self.store.load(), [])
 
-    def test_tool_without_a_chat_is_refused(self):
+    def test_tool_without_a_chat_is_refused_for_the_agent(self):
         result = json.loads(self.cmds.tool({"text": "Wake up", "first_at": "2026-11-07T16:00"}))
-        self.assertIn("hermes snooze platform", result["error"])
+        self.assertEqual(
+            result["error"],
+            "Several platforms have a home channel (telegram, discord) and there is no chat. "
+            "Ask the user which platform to use, then call snooze_create again with `platform`. Nothing was set.",
+        )
         self.assertEqual(self.store.load(), [])
 
     def test_cli_escape_via(self):
@@ -1313,12 +1366,28 @@ class PlatformCommandTest(Base):
             with self.subTest(value=value):
                 reply = self.run_cmd(f"platform {value.upper()}")
                 self.assertEqual(self.ctx.config["notification_platform"], value)
-                self.assertTrue(reply.startswith("✅ Default platform: "))
+                self.assertTrue(reply.startswith("✅ Reminders go to "))
                 self.assertEqual(commands.read_settings(self.ctx).notification_platform, value)
 
     def test_set_replies(self):
-        self.assertEqual(self.run_cmd("platform discord"), "✅ Default platform: Discord (home channel)")
-        self.assertEqual(self.run_cmd("platform source"), "✅ Default platform: the chat where you type (source)")
+        self.assertEqual(
+            self.run_cmd("platform telegram"),
+            "✅ Reminders go to Telegram (home channel). Change: /snooze platform discord|source",
+        )
+        self.assertEqual(
+            self.run_cmd("platform discord"),
+            "✅ Reminders go to Discord (home channel). Change: /snooze platform telegram|source",
+        )
+        self.assertEqual(
+            self.run_cmd("platform source"),
+            "✅ Reminders go to the chat where you type (source). Change: /snooze platform telegram|discord",
+        )
+
+    def test_set_reply_in_the_terminal_names_the_hermes_command(self):
+        self.assertEqual(
+            self.cmds.platform("telegram", terminal=True)[1],
+            "✅ Reminders go to Telegram (home channel). Change: hermes snooze platform discord|source",
+        )
 
     def test_platform_without_a_home_channel_is_refused_and_nothing_is_written(self):
         self.homes = {"telegram": HOME}

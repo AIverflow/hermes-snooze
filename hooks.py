@@ -46,16 +46,11 @@ _background_tasks: set = set()  # strong references: the event loop keeps only w
 # What the agent receives. See `docs/user-guide.md` ("Then-actions").
 def then_prompt(snooze: Snooze, extra: str | None = None) -> str:
     """Build the follow-up request shared by rewrite and injection paths."""
-    if snooze.answer is not None:
-        prompt = (
-            f"The user confirmed the reminder '{snooze.text}' with the answer '{snooze.answer}'. "
-            f"Now do this: {snooze.then}. Then tell the user the result in one line."
-        )
-    else:
-        prompt = (
-            f"The user confirmed the reminder '{snooze.text}'. Now do this: {snooze.then}. "
-            "Then tell the user the result in one line."
-        )
+    answer = f" with the answer '{snooze.answer}'" if snooze.answer is not None else ""
+    prompt = (
+        f"The user confirmed the reminder '{snooze.text}'{answer}. Now do this: {snooze.then}. "
+        "Then tell the user the result in one line."
+    )
     if extra:
         prompt += f"\nThe user also wrote: {extra}"
     return prompt
@@ -113,7 +108,7 @@ def then_origin(target: Target, source: Any = None) -> dict:
     if target.user_id:
         origin["user_id"] = str(target.user_id)
     if source is not None:
-        platform = str(getattr(source.platform, "value", source.platform) or "").lower()
+        platform = commands.platform_name(source.platform)
         if platform == origin["platform"] and str(source.chat_id) == origin["chat_id"]:
             for name in ("chat_type", "user_id", "user_name", "thread_id"):
                 value = getattr(source, name, None)
@@ -173,7 +168,7 @@ class Hooks:
         text = getattr(event, "text", None)
         if source is None or not isinstance(text, str) or not text.strip() or text.lstrip().startswith("/"):
             return None
-        platform = str(getattr(source.platform, "value", source.platform) or "").lower()
+        platform = commands.platform_name(source.platform)
         chat_id = str(source.chat_id)
 
         snoozes = [s for s in Store(self._data_dir()).load() if _live_in_chat(s, platform, chat_id)]
