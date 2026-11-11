@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from snooze import hooks, schedule
-from snooze.confirm import CONFIRM, LATER, Decision
+from snooze.confirm import CONFIRM, INVALID, LATER, Decision
 from snooze.hooks import Hooks
 from snooze.send import SendError
 from snooze.store import ACTIVE, DONE, PENDING, Schedule, Snooze, Store, Target
@@ -179,12 +179,11 @@ class ThenTest(Base):
             [("123", "✅ Done for today: Wake up. Now: start the coffee machine… Next: tomorrow 09:00")],
         )
 
-    async def test_confirm_with_extra_text_rewrites_and_keeps_what_the_user_wrote(self):
-        self.with_then()
-        result = await self.dispatch(event("ok, and book a table"))
-        self.assertEqual(
-            result, {"action": "rewrite", "text": self.PROMPT + "\nThe user also wrote: ok, and book a table"}
-        )
+    async def test_confirm_with_extra_text_is_not_an_answer_and_reaches_the_agent(self):
+        s = self.with_then()
+        self.assertIsNone(await self.dispatch(event("ok, and book a table")))
+        self.assertEqual(self.stored(s).state, ACTIVE)
+        self.assertEqual(self.sent(), [])
         self.assertEqual(self.inject.calls, [])
 
     async def test_text_confirm_without_then_is_unchanged(self):
@@ -192,10 +191,6 @@ class ThenTest(Base):
         self.assertEqual((await self.dispatch(event("ok")))["action"], "skip")
         self.assertEqual(self.stored(s).state, DONE)
         self.assertEqual(self.inject.calls, [])
-
-    async def test_extra_text_without_then_passes_through(self):
-        self.add()
-        self.assertIsNone(await self.dispatch(event("ok, and tell me a joke")))
 
     async def test_command_origin_takes_the_chat_type_and_thread_of_the_confirming_message(self):
         s = self.with_then(target=Target("telegram", "-100", "42"))
@@ -290,12 +285,11 @@ class DispatchTest(Base):
         self.assertEqual(self.sent(), [("123", "✅ Done: Wake up")])
         self.assertEqual(self.inject.calls, [])  # no `then`: nothing for the agent
 
-    async def test_confirm_with_more_text_passes_through(self):
+    async def test_confirm_with_more_text_is_not_an_answer(self):
         s = self.add()
-        result = await self.dispatch(event("ok, and tell me a joke"))
-        self.assertIsNone(result)
-        self.assertEqual(self.stored(s).state, DONE)
-        self.assertEqual(self.sent(), [("123", "✅ Done: Wake up")])
+        self.assertIsNone(await self.dispatch(event("ok, and tell me a joke")))
+        self.assertEqual(self.stored(s).state, ACTIVE)
+        self.assertEqual(self.sent(), [])
 
     async def test_choice_answer_is_saved_replied_and_given_to_then_action(self):
         s = self.add(
@@ -430,7 +424,7 @@ class DispatchTest(Base):
         self.assertEqual(self.sent(), [])
 
     async def test_slash_command_is_never_an_answer(self):
-        s = self.add(confirm={"kind": "any", "value": ""})
+        s = self.add(awaiting_answer=True)
         self.assertIsNone(await self.dispatch(event("/snooze list")))
         self.assertEqual(self.stored(s).state, ACTIVE)
 
@@ -473,9 +467,114 @@ class DispatchTest(Base):
 
     async def test_changed_snooze_is_not_touched(self):
         s = self.add(state=DONE)
-        self.assertIsNone(self.hooks._apply(Decision(CONFIRM, s.id, None, False)))
-        self.assertIsNone(self.hooks._apply(Decision(LATER, s.id, 5, False)))
-        self.assertIsNone(self.hooks._apply(Decision(CONFIRM, 999, None, False)))
+        self.assertIsNone(self.hooks._apply(Decision(CONFIRM, s.id)))
+        self.assertIsNone(self.hooks._apply(Decision(LATER, s.id, 5)))
+        self.assertIsNone(self.hooks._apply(Decision(INVALID, s.id), "hmm"))
+        self.assertIsNone(self.hooks._apply(Decision(CONFIRM, 999)))
+
+
+class InvalidAnswerTest(Base):
+    """A message that is not an answer, but belongs to a reminder: the list, and it never reaches the agent."""
+
+    LIST = (
+        '"okkkk" is not a valid answer for #{id} (Wake up).\n'
+        "Reply: Ok · later · later 15     Or type: /snooze ok {id} · /snooze cancel {id}"
+    )
+
+    async def test_quoted_invalid_reply_gets_the_list_and_is_skipped(self):
+        s = self.add()
+        result = await self.dispatch(event("okkkk", reply_to="777"))
+        self.assertEqual(result, hooks.SKIP)
+        self.assertEqual(self.sent(), [("123", self.LIST.format(id=s.id))])
+        self.assertEqual(self.stored(s).state, ACTIVE)
+        self.assertIsNone(self.stored(s).answer)
+
+    async def test_first_message_after_a_reminder_gets_the_list_the_second_goes_to_the_agent(self):
+        s = self.add(awaiting_answer=True)
+        self.assertEqual(await self.dispatch(event("okkkk")), hooks.SKIP)
+        self.assertEqual(self.sent(), [("123", self.LIST.format(id=s.id))])
+        self.assertFalse(self.stored(s).awaiting_answer)
+        self.assertIsNone(await self.dispatch(event("what is the weather")))
+        self.assertEqual(len(self.sent()), 1)
+
+    async def test_a_message_while_not_awaiting_goes_to_the_agent(self):
+        self.add()
+        self.assertIsNone(await self.dispatch(event("okkkk")))
+        self.assertEqual(self.sent(), [])
+
+    async def test_a_valid_answer_after_an_invalid_one_confirms(self):
+        s = self.add(awaiting_answer=True)
+        await self.dispatch(event("okkkk"))
+        result = await self.dispatch(event("ok"))
+        self.assertEqual(result["action"], "skip")
+        self.assertEqual(self.stored(s).state, DONE)
+
+    async def test_a_valid_answer_clears_the_flag(self):
+        s = self.add(awaiting_answer=True, confirm={"kind": "word", "value": "later"})
+        await self.dispatch(event("later 5"))
+        self.assertFalse(self.stored(s).awaiting_answer)
+
+    async def test_confirm_with_then_rewrites_without_extra_text(self):
+        s = self.add(then="start the coffee machine", awaiting_answer=True)
+        result = await self.dispatch(event("ok"))
+        self.assertEqual(result["action"], "rewrite")
+        self.assertNotIn("also wrote", result["text"])
+        self.assertEqual(self.stored(s).state, DONE)
+
+    async def test_invalid_reply_to_a_then_snooze_does_not_run_the_action(self):
+        s = self.add(then="start the coffee machine")
+        self.assertEqual(await self.dispatch(event("nope", reply_to="777")), hooks.SKIP)
+        self.assertEqual(self.stored(s).state, ACTIVE)
+        self.assertEqual(self.inject.calls, [])
+
+    async def test_choice_list_has_no_ok_command(self):
+        s = self.add(confirm={"kind": "choice", "value": "merge|review"}, awaiting_answer=True)
+        await self.dispatch(event("maybe"))
+        self.assertEqual(
+            self.sent(),
+            [
+                (
+                    "123",
+                    f'"maybe" is not a valid answer for #{s.id} (Wake up).\n'
+                    f"Reply: merge · review · 1 · 2 · later · later 15     Or type: /snooze cancel {s.id}",
+                )
+            ],
+        )
+
+    async def test_discord_list_says_reply_to_a_reminder(self):
+        s = self.add(target=Target("discord", "chan", "42"), awaiting_answer=True)
+        ev = event("okkkk", chat="chan", platform=Platform.DISCORD, chat_type="group")
+        self.assertEqual(await self.dispatch(ev), hooks.SKIP)
+        text = self.sent()[0][1]
+        self.assertIn("Reply (to a reminder): Ok · later · later 15", text)
+        self.assertIn(f"/snooze cancel {s.id}", text)
+
+    async def test_stranger_in_the_chat_is_not_answered(self):
+        s = self.add(awaiting_answer=True)
+        self.assertIsNone(await self.dispatch(event("okkkk", user="7", reply_to="777")))
+        self.assertTrue(self.stored(s).awaiting_answer)
+        self.assertEqual(self.sent(), [])
+
+    async def test_refused_sender_of_a_home_channel_snooze_is_not_answered(self):
+        s = self.add(target=Target("discord", "chan", None), awaiting_answer=True)
+        ev = event("okkkk", chat="chan", platform=Platform.DISCORD, chat_type="group")
+        self.assertIsNone(await self.dispatch(ev))
+        self.assertTrue(self.stored(s).awaiting_answer)
+        self.assertEqual(self.sent(), [])
+
+    async def test_pending_snooze_is_unchanged(self):
+        s = self.add(state=PENDING, awaiting_answer=True)
+        self.assertIsNone(await self.dispatch(event("hello")))
+        self.assertEqual(self.stored(s).state, PENDING)
+
+    async def test_reaction_does_not_touch_the_flag(self):
+        s = self.add(confirm=EMOJI, awaiting_answer=True)
+        self.hooks.gateway_platform_event(
+            platform="telegram",
+            event_type="reaction",
+            payload={"emojis": ["👎"], "chat_id": "123", "message_id": "777"},
+        )
+        self.assertTrue(self.stored(s).awaiting_answer)
 
 
 class NoUserIdTest(Base):

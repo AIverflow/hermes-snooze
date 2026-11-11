@@ -114,11 +114,9 @@ class ConfirmTableTest(unittest.TestCase):
     def test_word(self):
         self.assertEqual(self.confirm("ok taken"), p.ConfirmRule("word", "taken"))
 
-    def test_contains(self):
-        self.assertEqual(self.confirm("ok contains:sent"), p.ConfirmRule("contains", "sent"))
-
-    def test_any(self):
-        self.assertEqual(self.confirm("ok any"), p.ConfirmRule("any"))
+    def test_any_and_contains_are_plain_words(self):
+        self.assertEqual(self.confirm("ok any"), p.ConfirmRule("word", "any"))
+        self.assertEqual(self.confirm("ok contains:sent"), p.ConfirmRule("word", "contains:sent"))
 
     def test_emoji(self):
         self.assertEqual(self.confirm("ok \U0001f44d"), p.ConfirmRule("emoji", "\U0001f44d"))
@@ -657,9 +655,6 @@ class BadInputTest(unittest.TestCase):
     def test_then_without_action(self):
         e = self.assertError("Wake up at 8am then")
         self.assertIn("then", e.message)
-
-    def test_ok_contains_empty(self):
-        self.assertError("Wake up at 8am ok contains:")
 
     def test_ok_punctuation_only(self):
         self.assertError("Wake up at 8am ok !!")

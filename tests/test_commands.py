@@ -196,8 +196,7 @@ class ValidateSetupOnTest(Base):
     def test_stop_hint_follows_confirm_rule(self):
         cases = {
             "ok taken": 'reply "taken"',
-            "ok any": "any message",
-            "ok contains:sent": 'containing "sent"',
+            "ok any": 'reply "any"',
             "ok 👍": "send 👍",
         }
         for suffix, expected in cases.items():
@@ -466,13 +465,11 @@ class ConfirmRoundTripTest(Base):
         self.assertEqual(self.decide("Taken!").action, confirm.CONFIRM)
         self.assertEqual(self.decide("ok").action, confirm.NONE)
 
-    def test_contains(self):
-        self.create("Report in 30m every 5m ok contains:sent")
-        self.assertEqual(self.decide("I sent it").action, confirm.CONFIRM)
-
-    def test_any(self):
-        self.create("Report in 30m every 5m ok any")
-        self.assertEqual(self.decide("whatever").action, confirm.CONFIRM)
+    def test_any_is_a_plain_word(self):
+        s = self.create("Report in 30m every 5m ok any")
+        self.assertEqual(s.confirm, {"kind": "word", "value": "any"})
+        self.assertEqual(self.decide("any").action, confirm.CONFIRM)
+        self.assertEqual(self.decide("whatever").action, confirm.NONE)
 
     def test_emoji(self):
         self.create("Report in 30m every 5m ok 👍")
@@ -1062,8 +1059,7 @@ class ToolTest(Base):
         me = confirm.Sender(platform="telegram", chat_id="123", user_id="42")
         for value, said in (
             ("taken", "taken"),
-            ("contains:sent", "I sent it"),
-            ("any", "hmm"),
+            ("any", "any"),
             ("👍", "👍"),
             ("ok", "ok"),
         ):
@@ -1071,6 +1067,13 @@ class ToolTest(Base):
                 self.call(text="Wake up", first_at="2026-11-07T16:00", confirm=value)
                 last = sent(self.store.load()[-1:])
                 self.assertEqual(confirm.match(said, last, me).action, confirm.CONFIRM)
+
+    def test_removed_confirm_kinds_are_refused(self):
+        for kind in ("any", "contains"):
+            with self.subTest(kind=kind):
+                result = self.call(text="Wake up", first_at="2026-11-07T16:00", confirm={"kind": kind, "value": "x"})
+                self.assertIn("is not one of ok, word, emoji, choice", result["error"])
+        self.assertEqual(self.store.load(), [])
 
     def test_confirm_dict(self):
         self.call(text="Wake up", first_at="2026-11-07T16:00", confirm={"kind": "word", "value": "done"})

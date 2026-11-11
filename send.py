@@ -203,8 +203,10 @@ class Timer:
             if result.error is not None:
                 snooze.last_error = result.error  # a failed reminder keeps its due time: the next tick retries it
                 continue
-            if result.job.action.kind == SEND and result.message_id is not None:
-                snooze.last_message_id = result.message_id
+            if result.job.action.kind == SEND:
+                snooze.awaiting_answer = True  # the next message in the chat is the answer to this reminder
+                if result.message_id is not None:
+                    snooze.last_message_id = result.message_id
             if result.job.action.kind != SEND:
                 snooze.last_error = None
             elif snooze.state != ACTIVE or snooze.next_at != result.job.next_at:

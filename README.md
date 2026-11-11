@@ -100,7 +100,7 @@ Type these after `/snooze <what>`, in any order; put `then` last. Details: [user
 | `on <day>` | One time, on the next such day | `at 9am on monday` |
 | `until <time>` | Stop reminding at this time | `until 18:00` |
 | `via <platform>` | Send to that platform's home channel (`telegram` or `discord`) | `via discord` |
-| `ok <answer>` | Confirm with a word, an emoji, or choices (`a\|b\|c`); the guide lists the rest | `ok done`, `ok ✅`, `ok merge\|review` |
+| `ok <answer>` | Confirm with a word, an emoji, or choices (`a\|b\|c`); the reply must be exactly that | `ok done`, `ok ✅`, `ok merge\|review` |
 | `then <action>` | The agent does this after you confirm | `then run ./deploy.sh` |
 
 Reply `later` (or `later 15`) to a reminder to postpone it.
@@ -126,6 +126,7 @@ Use cron for reports, scripts and agent tasks on a schedule. Use Snooze when som
 - The Hermes gateway must be running on an awake machine for reminders and replies to work.
 - Snooze does not support voice-note confirmations or WhatsApp Cloud API.
 - Reaction confirmations are supported only in Telegram private chats.
+- Reminders arrive in the chat you talk to your agent in. The first message after a reminder is read as its answer: if it is not one, Snooze replies with the valid answers and the agent does not see it.
 - Snoozes belong to the Hermes profile: `/snooze list`, `/snooze ok` and `/snooze cancel` act on every snooze of the profile, whatever chat it was sent to, and anyone Hermes authorizes in that profile can use them. Replies in the chat only count in the reminder's own chat.
 
 ![Snooze at a glance: how it works, with six example snoozes](docs/snooze-diagram.png)

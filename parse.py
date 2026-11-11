@@ -197,10 +197,7 @@ def _is_emoji(word: str) -> bool:
 
 
 def parse_ok_arg(arg: str) -> ConfirmRule | ParseError:
-    """The rule after ``ok``: ``any``, choices, ``contains:<word>``, emoji or a word."""
-    low = arg.casefold()
-    if low == "any":
-        return ConfirmRule("any")
+    """The rule after ``ok``: choices, an emoji or a word."""
     if "|" in arg:
         options = arg.split("|")
         if (
@@ -213,13 +210,6 @@ def parse_ok_arg(arg: str) -> ConfirmRule | ParseError:
                 "/snooze Dinner? at 8pm ok asian|french|italian",
             )
         return ConfirmRule("choice", arg)
-    if low.startswith("contains:"):
-        value = arg[len("contains:") :]
-        if any(c.isalnum() for c in value):
-            return ConfirmRule("contains", value)
-        return ParseError(
-            "`ok contains:` needs a word after the colon.", "/snooze Send the report at 4pm ok contains:sent"
-        )
     if _is_emoji(arg):
         return ConfirmRule("emoji", arg)
     if any(c.isalnum() for c in arg):

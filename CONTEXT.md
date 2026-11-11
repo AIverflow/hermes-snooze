@@ -21,7 +21,7 @@ The days on which a recurring snooze starts a new occurrence (`daily`, `weekdays
 _Avoid_: repeat (that means the interval between reminders)
 
 **Confirm rule**:
-What the user must reply to answer an occurrence: `Ok`, a word, an emoji, a substring, anything, or one of several choices.
+What the user must reply to answer an occurrence: `Ok`, a word, an emoji, or one of several choices. The whole reply must be exactly that.
 _Avoid_: validation, ack
 
 **Choice**:

@@ -128,15 +128,39 @@ def _stop_text(rule: Any) -> str:
     value = rule.get("value", "") if isinstance(rule, dict) else ""
     if kind == "choice":
         return "reply with one of: " + numbered(choice_options(rule))
-    if kind == "word":
+    if kind == "word" and str(value).strip():
         return f'reply "{value}"'
-    if kind == "contains":
-        return f'reply with a message containing "{value}"'
-    if kind == "any":
-        return "reply with any message"
-    if kind == "emoji":
+    if kind == "emoji" and str(value).strip():
         return f"send {value}"
     return 'reply "Ok"'
+
+
+MAX_QUOTED_CHARS = 40
+
+
+def _answer_words(rule: Any) -> list[str]:
+    """What the user can type to answer: the options and their numbers, the word or emoji, or `Ok`."""
+    options = choice_options(rule)
+    if options:
+        return [*options, *(str(n) for n in range(1, len(options) + 1))]
+    kind = rule.get("kind") if isinstance(rule, dict) else None
+    value = str(rule.get("value") or "").strip() if isinstance(rule, dict) else ""
+    return [value] if kind in ("word", "emoji") and value else ["Ok"]
+
+
+def invalid_answer_text(snooze: Snooze, typed: str) -> str:
+    """The reply to a message that is not an answer: the valid answers, and the commands that always work."""
+    quoted = " ".join(typed.split())
+    if len(quoted) > MAX_QUOTED_CHARS:
+        quoted = quoted[:MAX_QUOTED_CHARS] + "…"
+    discord = snooze.target.platform.lower() == "discord"
+    reply = " · ".join([*_answer_words(snooze.confirm), "later", "later 15"])
+    commands = [] if choice_options(snooze.confirm) else [f"/snooze ok {snooze.id}"]
+    commands.append(f"/snooze cancel {snooze.id}")
+    return (
+        f'"{quoted}" is not a valid answer for #{snooze.id} ({snooze.text}).\n'
+        f"{'Reply (to a reminder)' if discord else 'Reply'}: {reply}     Or type: {' · '.join(commands)}"
+    )
 
 
 def render_echo(

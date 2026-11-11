@@ -254,21 +254,21 @@ def _minutes_arg(token: str) -> float | None:
     return echo.minutes_value(delta) if delta else None
 
 
-_BAD_CONFIRM = "confirm must be one word, an emoji, `any` or `contains:<word>`."
+_BAD_CONFIRM = "confirm must be one word, an emoji, or options separated by |."
 
 
 def _confirm_rule(value: Any) -> ConfirmRule | str:
     """A ConfirmRule from the tool's `confirm` value, or an error message."""
     if isinstance(value, dict):
         kind, text = str(value.get("kind") or "ok").lower(), str(value.get("value") or "")
-        if kind not in ("ok", "word", "contains", "any", "emoji", "choice"):
-            return f"confirm kind {kind!r} is not one of ok, word, contains, any, emoji, choice."
+        if kind not in ("ok", "word", "emoji", "choice"):
+            return f"confirm kind {kind!r} is not one of ok, word, emoji, choice."
         if kind == "choice":
             rule = _parse.parse_ok_arg(text)
             return rule if isinstance(rule, ConfirmRule) and rule.kind == "choice" else _BAD_CONFIRM
-        if kind in ("word", "contains", "emoji") and not text.strip():
+        if kind in ("word", "emoji") and not text.strip():
             return f"confirm kind {kind!r} needs a value."
-        return ConfirmRule(kind, "" if kind in ("ok", "any") else text)
+        return ConfirmRule(kind, "" if kind == "ok" else text)
     text = str(value if value is not None else "").strip()
     if text.lower() in ("", "ok"):
         return ConfirmRule()
@@ -995,9 +995,9 @@ TOOL_SCHEMA = {
             "confirm": {
                 "type": "string",
                 "description": (
-                    "How the user confirms: 'ok' (default), a word, an emoji, 'any' (any message) or "
-                    "'contains:<word>'; or options separated by | for a choice, for example "
-                    "'asian|french|italian' (2 to 9 one-word options); "
+                    "How the user confirms: 'ok' (default), a word or an emoji; or options separated by | "
+                    "for a choice, for example 'asian|french|italian' (2 to 9 one-word options). "
+                    "The whole reply must be exactly that (case and punctuation ignored); for a choice, "
                     "the user replies with an option or its number."
                 ),
             },

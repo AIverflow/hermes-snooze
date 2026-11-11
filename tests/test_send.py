@@ -93,6 +93,20 @@ class TickTest(TimerCase):
         self.assertEqual(s.last_sent_at, iso(T0))
         self.assertEqual(s.next_at, iso(T0 + timedelta(minutes=10)))
 
+    def test_every_reminder_arms_the_next_message_as_the_answer(self):
+        sid = self.add()
+        self.timer.tick()
+        self.assertTrue(self.get(sid).awaiting_answer)
+        self.store.update(lambda txn: setattr(txn.get(sid), "awaiting_answer", False))  # a message was read
+        self.now = T0 + timedelta(minutes=10)
+        self.timer.tick()
+        self.assertTrue(self.get(sid).awaiting_answer)
+
+    def test_a_miss_does_not_arm_the_answer(self):
+        sid = self.add(sent_count=3)
+        self.timer.tick()
+        self.assertFalse(self.get(sid).awaiting_answer)
+
     def test_nothing_due_sends_nothing_and_writes_nothing(self):
         self.add(next_at=T0 + timedelta(minutes=5))
         before = self.store.path.read_text()

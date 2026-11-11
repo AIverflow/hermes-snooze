@@ -7,7 +7,7 @@ For installation and your first snooze, start with the [README](../README.md#sta
 Use `/snooze` followed by the reminder text, a start time or delay, and optional clauses:
 
 ```text
-/snooze <what> (at <time> | in <duration>) [every <duration>] [until <time>] [daily | everyday | weekdays | every <days> | on <day>] [via <platform>] [ok <word> | ok <emoji> | ok contains:<word> | ok any | ok <a>|<b>|…] [then <action>]
+/snooze <what> (at <time> | in <duration>) [every <duration>] [until <time>] [daily | everyday | weekdays | every <days> | on <day>] [via <platform>] [ok <word> | ok <emoji> | ok <a>|<b>|…] [then <action>]
 ```
 
 Choose one of `at` or `in`; parentheses and brackets are notation, not text to type. The reminder text can be in any language; clause keywords are English. For a request in plain language, ask Hermes to create the snooze instead of using `/snooze` syntax.
@@ -23,7 +23,7 @@ Choose one of `at` or `in`; parentheses and brackets are notation, not text to t
 | `every <days>` | Start a new occurrence each week on listed days (`monday,thursday`, or a range such as `monday-friday`; `mon,thu` and `mon-fri` work too); for example, `/snooze Water plants at 8am every monday,thursday`. It can be combined with `every <duration>`: `every monday every 10m`. |
 | `on <day>` | One-time snooze on the next such day at the `at` time (today if that time is still ahead); one day only, and `on monday,thursday` is refused (use `every`); for example, `/snooze Call the dentist at 9am on monday`. |
 | `via <platform>` | Send this snooze to that platform's home channel (`telegram` or `discord`) instead of the current chat; for example, `/snooze Water plants at 8am daily via discord`. Refused, with nothing set, if the platform has no home channel: run `/sethome` in the wanted chat there. Any other word after `via` stays in the text (`Go to Lyon via Dijon`). |
-| `ok <word>`, `ok <emoji>`, `ok contains:<word>`, `ok any` | Require a word, an emoji, a message containing the word, or any message. See [Confirmations](#confirmations). |
+| `ok <word>`, `ok <emoji>` | Require that word or emoji as the whole reply. See [Confirmations](#confirmations). |
 | `ok <a>\|<b>\|…` | Require one of 2–9 distinct one-word options; for example, `ok cook\|takeaway\|restaurant`. |
 | `then <action>` | Ask the agent to do something after confirmation. See [Then-actions](#then-actions). |
 
@@ -109,29 +109,42 @@ Tue   20:00  20:10
 
 ## Confirmations
 
-By default, reply `Ok` to confirm. The `ok` clause can change the rule:
+By default, reply `Ok` to confirm. The `ok` clause can change the rule. The whole message must be the answer, nothing more:
 
-| Rule | Accepted confirmation |
-|---|---|
-| omitted or `ok` | `Ok` |
-| `ok <word>` | That word |
-| `ok <emoji>` | That emoji as a message or reaction |
-| `ok contains:<word>` | Any message containing the word |
-| `ok any` | Any message |
-| `ok <a>\|<b>\|…` | One of 2–9 distinct, non-empty options, by number or option text; the answer is passed to the then-action |
+| Rule | Valid | Not valid |
+|---|---|---|
+| omitted or `ok` | `ok`, `Ok!` | `ok thanks`, `okkkk` |
+| `ok <word>` | that word (`done`) | `done, deploying now` |
+| `ok <emoji>` | that emoji, as a message or a reaction | `great 👍` |
+| `ok <a>\|<b>\|…` (2–9 distinct, non-empty options) | an option or its number (`a`, `2`); the answer is passed to the then-action | `a please`, `1 then stop` |
+| `yes` (a snooze waiting for setup confirmation) | `yes` | |
 
 Words to reply in the chat:
 
 | Reply | Effect |
 |---|---|
 | `Ok` (or your `ok` rule) | Confirm. |
-| `later [N]` | Postpone by `N` minutes; without `N`, by the `every` interval. |
+| `later`, `later N`, `later Nm`, `later N min`, `later 1h` | Postpone by `N` minutes; without `N`, by the `every` interval. `later please` is not valid. |
 | `not now [N]` | Same as `later`. |
 | `yes` | Start a snooze waiting for setup confirmation. |
 
 Matching ignores case, extra spaces, punctuation, emoji skin tones and common check-mark variations. `OK!` matches the default rule, and `👍🏽` matches `ok 👍`; `✔️` matches `ok ✅`.
 
-`later`, `later 30`, `later 1h` and `not now` always postpone the snooze, even with `ok any`. For the default, word, emoji and choice rules, extra text can both confirm and continue to the agent: `ok, and book a table for 8`. For `any` and `contains`, the whole message is used as the answer and consumed.
+Snooze never passes an unclear reply to the agent. For a running snooze in its chat, from a user allowed to answer:
+
+1. A valid answer always counts, whether or not it replies to a reminder.
+2. A message that replies to the snooze's latest reminder is always Snooze's: if it is not valid, it gets the list below.
+3. The first message after a reminder is taken as the answer to it: if it is not valid, Snooze sends the list and the message does not reach the agent. Each new reminder arms this again.
+4. Any other message goes to the agent as usual.
+
+The list names the valid answers and the commands that always work:
+
+```text
+"okkkk" is not a valid answer for #31 (drink water).
+Reply: Ok · later · later 15     Or type: /snooze ok 31 · /snooze cancel 31
+```
+
+For a choice it lists the options and their numbers (`merge · review · 1 · 2`) and offers only `/snooze cancel 31`. On Discord, it says `Reply (to a reminder):`. On Discord, answer in a DM with the bot as you would on Telegram. In a server channel, even with only you and the bot, Hermes delivers only messages that mention or reply to the bot: reply to a reminder, or add the channel to `DISCORD_FREE_RESPONSE_CHANNELS` to answer without replying.
 
 For a choice, every reminder shows numbered options; reply with the number or option text. The selected option word is passed to the then-action. `/snooze ok <id>` cannot answer a choice; reply in the chat instead. On a recurring snooze, `later` delays only today's occurrence; it does not move the next scheduled day. A `later` that goes past the next scheduled time replaces that next occurrence: `later 25h` on a daily 08:00 snooze means no reminder at 08:00 tomorrow.
 
@@ -171,7 +184,7 @@ With `--wait`, exit codes are `0` for answered, `2` for an error or a recurring 
 
 ## Then-actions
 
-When a snooze with `then` is confirmed, Snooze reports that it is handing the action to the agent, then asks Hermes to continue in the same chat. A text confirmation can be reused as the agent's message; any extra text is included. A reaction or `/snooze ok` has no text to reuse, so Hermes must allow gateway injection.
+When a snooze with `then` is confirmed, Snooze reports that it is handing the action to the agent, then asks Hermes to continue in the same chat. A text confirmation is reused as the agent's message. A reaction or `/snooze ok` has no text to reuse, so Hermes must allow gateway injection.
 
 To enable that case, set `allow_gateway_injection: true` directly under the plugin entry (not under `settings`) in the active profile's `config.yaml`, then restart the gateway:
 
@@ -223,7 +236,7 @@ When several platforms have a home channel, `/snooze` alone adds a line saying w
 
 ## Agent tool
 
-The agent can create snoozes with `snooze_create`. It requires `text` and `first_at` (ISO 8601 in local time); `every`, `until`, `recurrence`, `platform` (like `via`), `confirm`, and `then` are optional. `recurrence` accepts `daily` (or `everyday`), `weekdays`, or day lists and ranges. `confirm` accepts `ok`, a word, emoji, `any`, `contains:<word>`, or a `|`-separated choice. Its argument details live in the tool schema in `commands.py`; its response uses the same summary shown for a chat command.
+The agent can create snoozes with `snooze_create`. It requires `text` and `first_at` (ISO 8601 in local time); `every`, `until`, `recurrence`, `platform` (like `via`), `confirm`, and `then` are optional. `recurrence` accepts `daily` (or `everyday`), `weekdays`, or day lists and ranges. `confirm` accepts `ok`, a word, an emoji, or a `|`-separated choice. Its argument details live in the tool schema in `commands.py`; its response uses the same summary shown for a chat command.
 
 ## Lifecycle and stored data
 
@@ -237,7 +250,7 @@ The agent can create snoozes with `snooze_create`. It requires `text` and `first
 
 A recurring snooze returns to `active` after each answer or miss. Its stored `answer` is the latest choice word or free-text answer, `days` stores the recurrence days, and `span` stores the length of each occurrence's reminder window; only `/snooze cancel <id>` ends the series.
 
-Snoozes are stored per profile in the plugin data directory. `snoozes.json` contains records with UTC ISO 8601 timestamps and is updated atomically. `snoozes.lock` protects changes to the data file; `sender.lock` ensures only one process sends reminders at a time.
+Snoozes are stored per profile in the plugin data directory. `snoozes.json` holds records with UTC ISO 8601 timestamps and is updated atomically. `snoozes.lock` protects changes to the data file; `sender.lock` ensures only one process sends reminders at a time.
 
 ## Troubleshooting and limits
 

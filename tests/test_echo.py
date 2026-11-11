@@ -31,6 +31,47 @@ class FormatTest(unittest.TestCase):
         self.assertEqual(echo.days_text([0, 3]), "Mon, Thu")
 
 
+class InvalidAnswerTextTest(unittest.TestCase):
+    def snooze(self, confirm=None, platform="telegram", text="drink water"):
+        return Snooze(
+            id=31,
+            text=text,
+            created=NOW.isoformat(),
+            target=Target(platform, "1", "1"),
+            schedule=Schedule(first_at=NOW.isoformat(), every=10),
+            confirm=confirm,
+        )
+
+    def test_ok_snooze(self):
+        self.assertEqual(
+            echo.invalid_answer_text(self.snooze(), "okkkk"),
+            '"okkkk" is not a valid answer for #31 (drink water).\n'
+            "Reply: Ok · later · later 15     Or type: /snooze ok 31 · /snooze cancel 31",
+        )
+
+    def test_word_and_emoji_snooze(self):
+        word = echo.invalid_answer_text(self.snooze({"kind": "word", "value": "done"}), "x")
+        self.assertIn("Reply: done · later · later 15     Or type: /snooze ok 31 · /snooze cancel 31", word)
+        emoji = echo.invalid_answer_text(self.snooze({"kind": "emoji", "value": "👍"}), "x")
+        self.assertIn("Reply: 👍 · later · later 15", emoji)
+
+    def test_choice_snooze_has_no_ok_command(self):
+        text = echo.invalid_answer_text(self.snooze({"kind": "choice", "value": "merge|review"}), "x")
+        self.assertIn("Reply: merge · review · 1 · 2 · later · later 15     Or type: /snooze cancel 31", text)
+        self.assertNotIn("/snooze ok", text)
+
+    def test_discord_wording(self):
+        text = echo.invalid_answer_text(self.snooze(platform="discord"), "x")
+        self.assertIn("Reply (to a reminder): Ok · later · later 15", text)
+
+    def test_the_typed_text_is_cut_and_kept_on_one_line(self):
+        text = echo.invalid_answer_text(self.snooze(), "a\n" + "b" * 60)
+        self.assertEqual(text.splitlines()[0].split(" is not")[0], '"a ' + "b" * 38 + '…"')
+
+    def test_old_any_rule_lists_ok(self):
+        self.assertIn("Reply: Ok · later", echo.invalid_answer_text(self.snooze({"kind": "any", "value": ""}), "x"))
+
+
 class ReminderTextTest(unittest.TestCase):
     def snooze(self, sent_count=0):
         return Snooze(
@@ -49,8 +90,6 @@ class ReminderTextTest(unittest.TestCase):
         cases = [
             ({"kind": "word", "value": "taken"}, 'reply "taken"', "taken"),
             ({"kind": "emoji", "value": "✅"}, "send ✅", "✅"),
-            ({"kind": "contains", "value": "sent"}, 'reply with a message containing "sent"', "I sent it"),
-            ({"kind": "any", "value": ""}, "reply with any message", "ready now"),
         ]
         for rule, instruction, answer in cases:
             with self.subTest(rule=rule):
@@ -98,6 +137,13 @@ class ReminderTextTest(unittest.TestCase):
             echo.reminder_text(snooze),
             "🔔 Snooze #14: Dinner? (2nd)\n1 asian | 2 french | 3 italian",
         )
+
+    def test_old_any_and_contains_rules_read_as_ok(self):
+        for rule in ({"kind": "any", "value": ""}, {"kind": "contains", "value": "sent"}):
+            with self.subTest(rule=rule):
+                snooze = self.snooze()
+                snooze.confirm = rule
+                self.assertEqual(echo.reminder_text(snooze), '🔔 Snooze #14: Stretch  (reply "Ok" | later)')
 
     def test_missed_text(self):
         self.assertEqual(echo.missed_text(self.snooze(3)), "⌛ Missed: Stretch (3 reminders, no answer)")

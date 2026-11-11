@@ -23,6 +23,7 @@ def snooze(
     last_sent_at="2026-11-07T16:00:00",
     last_message_id="m1",
     every=10,
+    awaiting=False,
 ):
     """A stored snooze. `confirm_rule` is what the user typed after `ok`, or a ready dict."""
     return Snooze(
@@ -35,6 +36,7 @@ def snooze(
         state=state,
         last_sent_at=last_sent_at,
         last_message_id=last_message_id,
+        awaiting_answer=awaiting,
     )
 
 
@@ -48,27 +50,23 @@ def run(text, snoozes=None, sender=ME, reply_to=None, **kw):
 class DefaultOk(unittest.TestCase):
     def test_plain_ok(self):
         d = run("ok")
-        self.assertEqual(d, Decision("confirm", 1, None, False))
+        self.assertEqual(d, Decision("confirm", 1))
         self.assertIsNone(d.answer)
 
     def test_case_spaces_punctuation(self):
         for text in ["OK", "Ok", " ok ", "ok!", "OK!!!", "ok.", "¡ok!", "(ok)"]:
             with self.subTest(text=text):
                 self.assertEqual(run(text).action, "confirm")
-                self.assertFalse(run(text).pass_through)
 
     def test_not_ok(self):
-        for text in ["okay", "nok", "not ok", "hello", "", "   ", "!!!"]:
+        for text in ["okay", "okkkk", "nok", "not ok", "hello", "", "   ", "!!!"]:
             with self.subTest(text=text):
                 self.assertEqual(run(text).action, "none")
 
-    def test_ok_with_emoji_is_still_pure(self):
-        # #15: "ok 👍🏽" is a pure confirm (emoji is not extra text)
-        for text in ["ok 👍🏽", "ok👍", "OK! 👍"]:
+    def test_ok_with_more_is_not_valid(self):
+        for text in ["ok thanks", "ok 👍🏽", "ok👍", "OK! 👍", "ok, and book a table for 8"]:
             with self.subTest(text=text):
-                d = run(text)
-                self.assertEqual(d.action, "confirm")
-                self.assertFalse(d.pass_through)
+                self.assertEqual(run(text).action, "none")
 
     def test_no_snoozes(self):
         self.assertEqual(run("ok", snoozes=[]).action, "none")
@@ -91,25 +89,25 @@ class WordRule(unittest.TestCase):
         self.assertEqual(run("All done!", s).action, "confirm")
         self.assertEqual(run("done", s).action, "none")
 
-    def test_word_with_more_text_passes_through(self):
-        s = [snooze(confirm_rule="taken")]
-        d = run("taken, and order more", s)
-        self.assertEqual((d.action, d.pass_through), ("confirm", True))
+    def test_word_with_more_text_is_not_valid(self):
+        s = [snooze(confirm_rule="done")]
+        self.assertEqual(run("done, deploying now", s).action, "none")
+        self.assertEqual(run("Done!", s).action, "confirm")
 
 
-class ContainsRule(unittest.TestCase):
-    def test_contains(self):
-        s = [snooze(confirm_rule="contains:sent")]
-        d = run("ok I sent it", s)
-        self.assertEqual((d.action, d.pass_through), ("confirm", False))
-        self.assertEqual(run("SENT", s).action, "confirm")
-        self.assertEqual(run("I did it", s).action, "none")
-        self.assertEqual(run("consent", s).action, "none")  # whole word only
+class RemovedRules(unittest.TestCase):
+    def test_old_any_and_contains_rules_act_as_ok(self):
+        for rule in [{"kind": "any", "value": ""}, {"kind": "contains", "value": "sent"}]:
+            with self.subTest(rule=rule):
+                s = [snooze(confirm_rule=rule)]
+                self.assertEqual(run("ok", s).action, "confirm")
+                self.assertEqual(run("hello", s).action, "none")
+                self.assertEqual(run("I sent it", s).action, "none")
 
-    def test_contains_dict(self):
-        s = [snooze(confirm_rule={"kind": "contains", "value": "sent"})]
-        self.assertEqual(run("it was sent yesterday", s).action, "confirm")
-        self.assertEqual(run("  It was SENT yesterday!  ", s).answer, "It was SENT yesterday!")
+    def test_any_is_now_a_plain_word(self):
+        s = [snooze(confirm_rule="any")]
+        self.assertEqual(run("any", s).action, "confirm")
+        self.assertEqual(run("hello", s).action, "none")
 
 
 class ChoiceRule(unittest.TestCase):
@@ -121,9 +119,10 @@ class ChoiceRule(unittest.TestCase):
         self.assertEqual(run("French", self.snoozes).answer, "french")
         self.assertEqual(run("french!", self.snoozes).answer, "french")
 
-    def test_number_with_follow_up_passes_through(self):
-        decision = run("2 and book a table", self.snoozes)
-        self.assertEqual((decision.action, decision.answer, decision.pass_through), ("confirm", "french", True))
+    def test_number_or_option_with_more_is_not_valid(self):
+        for text in ["2 and book a table", "french please", "1 then stop", "1 2"]:
+            with self.subTest(text=text):
+                self.assertEqual(run(text, self.snoozes).action, "none")
 
     def test_unlisted_number_or_text_does_not_match(self):
         self.assertEqual(run("4", self.snoozes).action, "none")
@@ -139,28 +138,15 @@ class ChoiceRule(unittest.TestCase):
         self.assertEqual(run("french", self.snoozes, sender=dm, is_reaction=True).action, "none")
 
 
-class AnyRule(unittest.TestCase):
-    def test_any_message(self):
-        s = [snooze(confirm_rule="any")]
-        for text in ["hello", "what time is it?", "👍", "x"]:
-            with self.subTest(text=text):
-                d = run(text, s)
-                self.assertEqual((d.action, d.pass_through), ("confirm", False))
-        self.assertEqual(run("  three glasses  ", s).answer, "three glasses")
-
-    def test_any_empty_message(self):
-        self.assertEqual(run("   ", [snooze(confirm_rule="any")]).action, "none")
-
-
 class EmojiRule(unittest.TestCase):
     def test_emoji_message(self):
         s = [snooze(confirm_rule="👍")]
-        self.assertEqual(run("👍", s), Decision("confirm", 1, None, False))
+        self.assertEqual(run("👍", s), Decision("confirm", 1))
 
     def test_skin_tones_and_variants(self):
         # #15
         s = [snooze(confirm_rule="👍")]
-        for text in ["👍🏽", "👍🏿", "👍🏻", "👍️", "👍👍"]:
+        for text in ["👍🏽", "👍🏿", "👍🏻", "👍️"]:
             with self.subTest(text=text):
                 self.assertEqual(run(text, s).action, "confirm")
 
@@ -181,10 +167,11 @@ class EmojiRule(unittest.TestCase):
         self.assertEqual(run("👎", s).action, "none")
         self.assertEqual(run("ok", s).action, "none")
 
-    def test_emoji_with_text_passes_through(self):
+    def test_emoji_with_more_is_not_valid(self):
         s = [snooze(confirm_rule="👍")]
-        d = run("👍 and book a table", s)
-        self.assertEqual((d.action, d.pass_through), ("confirm", True))
+        for text in ["👍 and book a table", "great 👍", "👍👍"]:
+            with self.subTest(text=text):
+                self.assertEqual(run(text, s).action, "none")
 
     def test_emoji_dict_rule(self):
         s = [snooze(confirm_rule={"kind": "emoji", "value": "👍"})]
@@ -194,7 +181,7 @@ class EmojiRule(unittest.TestCase):
 class Later(unittest.TestCase):
     def test_later_default_is_interval(self):
         d = run("later", [snooze(every=15)])
-        self.assertEqual(d, Decision("later", 1, 15, False))
+        self.assertEqual(d, Decision("later", 1, 15))
 
     def test_later_default_without_interval(self):
         d = run("later", [snooze(every=None)])
@@ -208,33 +195,32 @@ class Later(unittest.TestCase):
             ("later 30 min", 30),
             ("later 1h", 60),
             ("later 2 hours", 120),
+            ("later 15 min", 15),
             ("not now 20", 20),
         ]:
             with self.subTest(text=text):
                 d = run(text)
-                self.assertEqual((d.action, d.later_minutes, d.pass_through), ("later", minutes, False))
+                self.assertEqual((d.action, d.later_minutes), ("later", minutes))
 
     def test_not_now(self):
         self.assertEqual(run("not now").action, "later")
         self.assertEqual(run("Not now!").action, "later")
 
-    def test_later_zero_uses_default(self):
-        self.assertEqual(run("later 0", [snooze(every=7)]).later_minutes, 7)
-
-    def test_later_wins_over_any(self):
-        # #17: confirm = any message, "not now" must not count as done
-        s = [snooze(confirm_rule="any")]
-        for text in ["later", "later 30", "not now"]:
+    def test_later_with_more_is_not_valid(self):
+        for text in [
+            "later please",
+            "later, I'm busy",
+            "later 15 please",
+            "later 15 min please",
+            "later 0",
+            "later 5x",
+        ]:
             with self.subTest(text=text):
-                self.assertEqual(run(text, s).action, "later")
+                self.assertEqual(run(text).action, "none")
 
-    def test_later_wins_over_word_and_contains(self):
+    def test_later_wins_over_a_word_rule(self):
         self.assertEqual(run("later", [snooze(confirm_rule="later")]).action, "later")
-        self.assertEqual(run("not now", [snooze(confirm_rule="contains:now")]).action, "later")
-
-    def test_later_with_trailing_text_is_consumed(self):
-        d = run("later, I'm busy")
-        self.assertEqual((d.action, d.pass_through), ("later", False))
+        self.assertEqual(run("not now", [snooze(confirm_rule="not now")]).action, "later")
 
     def test_later_in_middle_is_not_later(self):
         self.assertEqual(run("I will do it later").action, "none")
@@ -243,18 +229,52 @@ class Later(unittest.TestCase):
         self.assertEqual(run("later", [snooze(state="pending")]).action, "none")
 
 
-class PassThrough(unittest.TestCase):
-    def test_confirm_with_more_text(self):
-        # #18
-        d = run("ok, and book a table for 8")
-        self.assertEqual(d, Decision("confirm", 1, None, True))
+class Invalid(unittest.TestCase):
+    """A message that is not an answer, but that Snooze owns (the ticket's rules 2 and 3)."""
 
-    def test_pure_confirm_is_dropped(self):
-        self.assertFalse(run("ok").pass_through)
+    def test_unrelated_message_is_left_alone(self):
+        self.assertEqual(run("what's the weather?").action, "none")
 
-    def test_unrelated_message_passes(self):
-        d = run("what's the weather?")
-        self.assertEqual((d.action, d.pass_through), ("none", True))
+    def test_quoted_reply_to_the_reminder_is_invalid(self):
+        d = run("okkkk", reply_to="m1")
+        self.assertEqual(d, Decision("invalid", 1))
+
+    def test_quoted_reply_to_another_message_is_not_owned(self):
+        self.assertEqual(run("okkkk", reply_to="zzz").action, "none")
+
+    def test_first_message_after_a_reminder_is_invalid(self):
+        s = [snooze(awaiting=True)]
+        self.assertEqual(run("okkkk", s), Decision("invalid", 1))
+
+    def test_valid_answer_acts_whatever_the_flag(self):
+        for awaiting in (True, False):
+            with self.subTest(awaiting=awaiting):
+                self.assertEqual(run("ok", [snooze(awaiting=awaiting)], reply_to="m1").action, "confirm")
+                self.assertEqual(run("later", [snooze(awaiting=awaiting)]).action, "later")
+
+    def test_only_the_last_sent_snooze_owns_a_plain_message(self):
+        s = [
+            snooze(id=1, awaiting=True, last_sent_at="2026-11-07T16:00:00"),
+            snooze(id=2, awaiting=False, last_sent_at="2026-11-07T16:10:00"),
+        ]
+        self.assertEqual(run("hmm", s).action, "none")
+
+    def test_yes_for_a_pending_snooze_beats_an_awaiting_one(self):
+        s = [snooze(id=1, awaiting=True), snooze(id=2, state="pending", last_sent_at=None, last_message_id=None)]
+        self.assertEqual(run("yes", s).snooze_id, 2)
+
+    def test_pending_snooze_is_never_invalid(self):
+        s = [snooze(state="pending", awaiting=True)]
+        self.assertEqual(run("hello", s, reply_to="m1").action, "none")
+
+    def test_stranger_is_not_owned(self):
+        stranger = Sender(platform="telegram", chat_id="999", user_id="999")
+        self.assertEqual(run("hello", [snooze(awaiting=True)], sender=stranger, reply_to="m1").action, "none")
+
+    def test_reaction_is_never_invalid(self):
+        dm = Sender(platform="telegram", chat_id="100", user_id=None, chat_type="private")
+        s = [snooze(confirm_rule="👍", awaiting=True)]
+        self.assertEqual(run("👎", s, sender=dm, reply_to="m1", is_reaction=True).action, "none")
 
 
 class WhichSnooze(unittest.TestCase):
@@ -360,7 +380,7 @@ class Reaction(unittest.TestCase):
     def test_reaction_in_private_chat(self):
         s = [snooze(confirm_rule="👍")]
         d = run("👍", s, sender=self.DM, is_reaction=True)
-        self.assertEqual(d, Decision("confirm", 1, None, False))
+        self.assertEqual(d, Decision("confirm", 1))
 
     def test_reaction_skin_tone_list(self):
         s = [snooze(confirm_rule="👍")]
@@ -385,7 +405,7 @@ class Reaction(unittest.TestCase):
         self.assertEqual(run("👍", s, sender=other, is_reaction=True).action, "none")
 
     def test_reaction_needs_emoji_rule(self):
-        for rule in ["ok", "any", "taken", "contains:sent"]:
+        for rule in ["ok", "taken"]:
             with self.subTest(rule=rule):
                 s = [snooze(confirm_rule=rule)]
                 self.assertEqual(run("👍", s, sender=self.DM, is_reaction=True).action, "none")
@@ -410,7 +430,7 @@ class Reaction(unittest.TestCase):
 class Yes(unittest.TestCase):
     def test_yes_validates_pending(self):
         s = [snooze(state="pending", last_sent_at=None, last_message_id=None)]
-        self.assertEqual(run("yes", s), Decision("yes", 1, None, False))
+        self.assertEqual(run("yes", s), Decision("yes", 1))
         self.assertEqual(run("Yes!", s).action, "yes")
 
     def test_yes_only_for_pending(self):
@@ -434,9 +454,9 @@ class Yes(unittest.TestCase):
         self.assertEqual(run("yes", s).snooze_id, 2)
         self.assertEqual(run("ok", s).snooze_id, 1)
 
-    def test_yes_with_confirm_any_rule_prefers_confirm(self):
-        # an active "any" snooze confirms; a pending one stays pending
-        s = [snooze(id=1, confirm_rule="any"), snooze(id=2, state="pending", last_sent_at=None)]
+    def test_yes_with_a_yes_word_rule_prefers_confirm(self):
+        # an active "yes" snooze confirms; a pending one stays pending
+        s = [snooze(id=1, confirm_rule="yes"), snooze(id=2, state="pending", last_sent_at=None)]
         self.assertEqual(run("yes", s).action, "confirm")
 
     def test_reply_to_pending_echo(self):

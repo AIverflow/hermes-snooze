@@ -79,6 +79,7 @@ class Snooze:
     last_error: str | None = None
     test: bool = False  # made by `/snooze test`; its texts differ from regular reminders
     answer: str | None = None
+    awaiting_answer: bool = False  # a reminder was sent and no message has been read since
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

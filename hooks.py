@@ -10,10 +10,11 @@ Two hooks, both cheap when the chat has no running or waiting snooze (one small 
 read, no lock):
 
 - `pre_gateway_dispatch` (async): runs before authorization and before the busy-session
-  lane, so an answer counts while the agent is busy. A pure answer is dropped (`skip`);
-  "ok, and tell me a joke" is answered and still passes on to the agent. Slash commands
-  are never read as an answer. If the snooze has a `then`, the message is rewritten into
-  the agent turn instead (`then_prompt`).
+  lane, so an answer counts while the agent is busy. An answer is dropped (`skip`), and so is
+  a message that is not an answer but belongs to a reminder (a reply to it, or the first
+  message after it): it gets the list of valid answers. Every other message passes on to the
+  agent. Slash commands are never read as an answer. If the snooze has a `then`, the answer
+  is rewritten into the agent turn instead (`then_prompt`).
 - `gateway_platform_event` (sync): a Telegram reaction on the last reminder message. It
   carries no user id and no chat type, so only private chats are accepted: Telegram
   gives them positive chat ids. Hermes has already authorized the reactor.
@@ -30,8 +31,8 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from . import commands
-from .confirm import CONFIRM, LATER, NONE, YES, Decision, Sender, match
+from . import commands, echo
+from .confirm import CONFIRM, INVALID, LATER, NONE, YES, Decision, Sender, match
 from .send import HermesSender, start_timer
 from .send import Sender as ReplySender
 from .store import ACTIVE, PENDING, Snooze, Store, Target
@@ -44,16 +45,13 @@ _background_tasks: set = set()  # strong references: the event loop keeps only w
 
 
 # What the agent receives. See `docs/user-guide.md` ("Then-actions").
-def then_prompt(snooze: Snooze, extra: str | None = None) -> str:
+def then_prompt(snooze: Snooze) -> str:
     """Build the follow-up request shared by rewrite and injection paths."""
     answer = f" with the answer '{snooze.answer}'" if snooze.answer is not None else ""
-    prompt = (
+    return (
         f"The user confirmed the reminder '{snooze.text}'{answer}. Now do this: {snooze.then}. "
         "Then tell the user the result in one line."
     )
-    if extra:
-        prompt += f"\nThe user also wrote: {extra}"
-    return prompt
 
 
 INJECT_REFUSED = (
@@ -181,7 +179,7 @@ class Hooks:
         decision = self._decide(text, snoozes, sender, reply_to, lambda: self._authorizes(gateway, source))
         if decision.action == NONE:
             return None
-        applied = self._apply(decision)
+        applied = self._apply(decision, text)
         if applied is None:
             return None  # the snooze changed since it was read: let the message through
         reply, snooze = applied
@@ -189,9 +187,8 @@ class Hooks:
         if decision.action == CONFIRM and snooze.then:
             # The user's own message becomes the agent turn: right session, normal authorization, and
             # no `allow_gateway_injection` needed (gateway/run_inbound_hooks.py:69-110, the `rewrite` action).
-            prompt = then_prompt(snooze, text if decision.pass_through else None)
-            return {"action": "rewrite", "text": prompt}
-        return None if decision.pass_through else SKIP
+            return {"action": "rewrite", "text": then_prompt(snooze)}
+        return SKIP
 
     @staticmethod
     def _decide(
@@ -279,8 +276,11 @@ class Hooks:
 
     # -- the state change ---------------------------------------------------------
 
-    def _apply(self, decision: Decision) -> tuple[str, Snooze] | None:
-        """Apply `decision` to the stored snooze. Returns (reply text, the record), or None if it no longer fits."""
+    def _apply(self, decision: Decision, text: str = "") -> tuple[str, Snooze] | None:
+        """Apply `decision` to the stored snooze. Returns (reply text, the record), or None if it no longer fits.
+
+        `text` is the message as typed, quoted back for an invalid answer.
+        """
         now = self._now()
         cap = self._cap_reminders()
         wanted = PENDING if decision.action == YES else ACTIVE
@@ -289,7 +289,11 @@ class Hooks:
             snooze = txn.get(decision.snooze_id)
             if snooze is None or snooze.state != wanted:
                 return None
-            if decision.action == CONFIRM:
+            if wanted == ACTIVE:
+                snooze.awaiting_answer = False  # a message was read: the next reminder arms it again
+            if decision.action == INVALID:
+                reply = echo.invalid_answer_text(snooze, text)
+            elif decision.action == CONFIRM:
                 reply = commands.confirm_snooze(snooze, now, decision.answer)
             elif decision.action == LATER:
                 reply = commands.push_back_snooze(snooze, now, decision.later_minutes, cap)

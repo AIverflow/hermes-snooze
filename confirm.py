@@ -6,20 +6,20 @@ Pure module: standard library plus the store's `Snooze` record.
 
 `snoozes` are `store.Snooze` records; only those in state "active" or "pending"
 count. Their `confirm` is the dict the store keeps: {"kind": "ok" | "word" |
-"contains" | "any" | "emoji" | "choice", "value": "<text>"}; `None` or an empty value means
-the default (`ok`). `schedule.every` (minutes) is the default `later` delay.
+"emoji" | "choice", "value": "<text>"}; `None`, an empty value or an unknown kind
+(for example one from an older version) means the default (`ok`). `schedule.every` (minutes)
+is the default `later` delay.
 
 `sender` says who wrote the message. For a reaction, `message` is the emoji (a
 string or a list of strings), `sender.user_id` is None (reactions carry none)
 and `sender.chat_type` must say it is a private chat.
 
-The matching rules (who can answer, `later`, pass-through, text folding) are
+The matching rules (who can answer, exact answers, `later`, text folding) are
 documented in `docs/user-guide.md` ("Confirmations").
 """
 
 import re
 import unicodedata
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +29,7 @@ NONE = "none"
 CONFIRM = "confirm"
 LATER = "later"
 YES = "yes"
+INVALID = "invalid"  # not an answer, but Snooze owns the message: reply with the valid answers
 
 DEFAULT_LATER_MINUTES = 10  # used only when the snooze has no usable interval
 
@@ -68,10 +69,9 @@ class Sender:
 class Decision:
     """What to do with an inbound message."""
 
-    action: str = NONE  # "none" | "confirm" | "later" | "yes"
+    action: str = NONE  # "none" | "confirm" | "later" | "yes" | "invalid"
     snooze_id: int | None = None  # the snooze concerned (None for "none")
     later_minutes: int | None = None  # only for "later"
-    pass_through: bool = True  # True: let the message reach the agent
     answer: str | None = None  # the option or message text that confirmed the occurrence
 
 
@@ -108,72 +108,33 @@ def _tokens(text: Any) -> list[str]:
     return normalize(text).split()
 
 
-def _has_words(tokens: Iterable[str]) -> bool:
-    """True if some token carries letters or digits (not just emoji / symbols)."""
-    return any(any(c.isalnum() for c in t) for t in tokens)
-
-
-def _find(tokens: list[str], needle: list[str]) -> int:
-    """Index of the first occurrence of `needle` in `tokens`, or -1."""
-    n = len(needle)
-    if n == 0:
-        return -1
-    for i in range(len(tokens) - n + 1):
-        if tokens[i : i + n] == needle:
-            return i
-    return -1
-
-
 # ---------------------------------------------------------------- confirm rule
 
 
 def _parse_rule(rule: dict | None) -> tuple[str, list[str] | list[list[str]]]:
-    """Return (kind, value tokens) for a stored confirm rule."""
+    """Return (kind, value tokens) for a stored confirm rule; anything unusable is the default `ok`."""
     rule = rule or {}
     kind = str(rule.get("kind") or "ok").lower()
     tokens = _tokens(rule.get("value"))
-    if kind == "ok":
-        return "ok", ["ok"]
-    if kind == "any":
-        return "any", []
     if kind == "choice":
         return "choice", [_tokens(option) for option in str(rule.get("value") or "").split("|")]
-    if kind == "word" and tokens and not _has_words(tokens):
+    if kind == "word" and tokens and not any(c.isalnum() for t in tokens for c in t):
         kind = "emoji"
-    if kind in ("word", "emoji", "contains") and not tokens:
-        return "ok", ["ok"]  # empty value: fall back to the default
+    if kind not in ("word", "emoji") or not tokens:
+        return "ok", ["ok"]
     return kind, tokens
 
 
-def _confirm_match(rule: dict | None, tokens: list[str], message: str):
-    """Return (matched, pass_through, answer) for a message against a rule."""
+def _confirm_match(rule: dict | None, tokens: list[str]) -> tuple[bool, str | None]:
+    """Return (matched, answer): the whole message must be the answer."""
     kind, value = _parse_rule(rule)
-    if not tokens:
-        return False, False, None
-    if kind == "any":
-        return True, False, message.strip()
-    if kind == "contains":
-        matched = _find(tokens, value) >= 0
-        return matched, False, message.strip() if matched else None
     if kind == "choice":
         options = str((rule or {}).get("value") or "").split("|")
         for index, option_tokens in enumerate(value, start=1):
-            if tokens[0] == str(index):
-                return True, _has_words(tokens[1:]), options[index - 1]
-            if option_tokens and tokens[: len(option_tokens)] == option_tokens:
-                return True, _has_words(tokens[len(option_tokens) :]), options[index - 1]
-        return False, False, None
-    if kind in ("ok", "word"):
-        if tokens[: len(value)] != value:
-            return False, False, None
-        return True, _has_words(tokens[len(value) :]), None
-    if kind == "emoji":
-        i = _find(tokens, value)
-        if i < 0:
-            return False, False, None
-        rest = tokens[:i] + tokens[i + len(value) :]
-        return True, _has_words(rest), None
-    return False, False, None
+            if tokens == [str(index)] or (option_tokens and tokens == option_tokens):
+                return True, options[index - 1]
+        return False, None
+    return tokens == value, None
 
 
 def _is_emoji_rule(rule: dict | None) -> bool:
@@ -184,24 +145,25 @@ def _is_emoji_rule(rule: dict | None) -> bool:
 
 
 def _later(tokens: list[str]):
-    """If the message is a `later` / `not now` request, return (True, minutes or None)."""
+    """If the whole message is a `later` / `not now` request, return (True, minutes or None)."""
     if tokens[:1] == ["later"]:
         rest = tokens[1:]
     elif tokens[:2] == ["not", "now"]:
         rest = tokens[2:]
     else:
         return False, None
-    if rest:
-        m = _DURATION.match(rest[0])
-        if m:
-            unit = m.group(2)
-            if not unit and len(rest) > 1 and rest[1] in _UNIT_MINUTES:
-                unit = rest[1]
-            if unit == "" or unit in _UNIT_MINUTES:
-                minutes = int(m.group(1)) * _UNIT_MINUTES.get(unit, 1)
-                if minutes > 0:
-                    return True, minutes
-    return True, None
+    if not rest:
+        return True, None
+    m = _DURATION.match(rest[0])
+    if not m:
+        return False, None
+    unit, extra = m.group(2), rest[1:]
+    if not unit and extra and extra[0] in _UNIT_MINUTES:
+        unit, extra = extra[0], extra[1:]
+    if extra or (unit and unit not in _UNIT_MINUTES):
+        return False, None
+    minutes = int(m.group(1)) * _UNIT_MINUTES.get(unit, 1)
+    return (True, minutes) if minutes > 0 else (False, None)
 
 
 def _default_later(snooze: Snooze) -> int:
@@ -278,23 +240,23 @@ def match(
         pending = pendings[-1] if pendings else None
 
     if is_reaction:
-        if (
-            active is not None
-            and _is_emoji_rule(active.confirm)
-            and _confirm_match(active.confirm, tokens, str(message))[0]
-        ):
-            return Decision(CONFIRM, active.id, None, False)
+        if active is not None and _is_emoji_rule(active.confirm) and _confirm_match(active.confirm, tokens)[0]:
+            return Decision(CONFIRM, active.id)
         return _NO_MATCH
 
     if active is not None:
         is_later, minutes = _later(tokens)
         if is_later:
-            return Decision(LATER, active.id, minutes if minutes is not None else _default_later(active), False)
-        matched, extra, answer = _confirm_match(active.confirm, tokens, str(message))
+            return Decision(LATER, active.id, minutes if minutes is not None else _default_later(active))
+        matched, answer = _confirm_match(active.confirm, tokens)
         if matched:
-            return Decision(CONFIRM, active.id, None, extra, answer)
+            return Decision(CONFIRM, active.id, answer=answer)
 
     if pending is not None and tokens == ["yes"]:
-        return Decision(YES, pending.id, None, False)
+        return Decision(YES, pending.id)
+
+    # Not an answer. Snooze still owns a reply to a reminder, and the first message after one.
+    if active is not None and (replied is not None or active.awaiting_answer):
+        return Decision(INVALID, active.id)
 
     return _NO_MATCH
