@@ -6,7 +6,7 @@ Add a follow-up and your agent acts after you answer. Add choices and it acts on
 
 ## Before you start
 
-hermes-snooze sends its reminders through a messaging platform, so **Hermes needs at least one platform configured** (for example Telegram or Discord). Without one there is no chat to remind you in. Requires Hermes Agent 0.22.7 or later and Python 3.10+.
+hermes-snooze sends its reminders through a messaging platform, so **Hermes needs at least one platform configured** (for example Telegram or Discord). Without one there is no chat to remind you in. Requires Hermes Agent 0.22.7 or later and Python 3.11+ (the same as Hermes).
 
 | Platform | Status |
 |---|---|
@@ -120,6 +120,14 @@ Hermes cron runs a job on a schedule. Snooze reminds you until you answer.
 | Where it sends | About 20 platforms, or several at once | One chat per snooze: Telegram and Discord tested, other Hermes platforms untested |
 
 Use cron for reports, scripts and agent tasks on a schedule. Use Snooze when someone must answer.
+
+## What Snooze runs and stores
+
+- A timer task inside the Hermes gateway checks every 15 s and sends due reminders through Hermes' own send path. No LLM call, no network call of its own, no telemetry, no credentials.
+- The `pre_gateway_dispatch` hook reads each incoming gateway text message before the agent. It acts only in a chat with a running snooze: an answer, or a message that replies to a reminder or comes first after one, is handled by Snooze and does not reach the agent. Everything else passes untouched. The `gateway_platform_event` hook reads Telegram reactions.
+- A `then` action asks the agent to act: your answer is rewritten into the request, or, after a reaction or `/snooze ok`, one agent turn is queued with `inject_message` (needs `allow_gateway_injection`).
+- Data: `snoozes.json` and two lock files in the plugin data folder, and the `notification_platform` setting in `config.yaml`.
+- Two private Hermes names are used (`send_message_tool`, `estop.is_engaged`); a daily GitHub check runs the plugin against new Hermes releases.
 
 ## Limits
 

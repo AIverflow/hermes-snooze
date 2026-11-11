@@ -271,4 +271,7 @@ ruff check .
 ruff format .
 ```
 
+GitHub runs two workflows. `ci.yml` runs the tests (Python 3.11 to 3.14, like Hermes), `ruff check` and `ruff format --check` on every push and pull request.
+`hermes-compat.yml` runs daily on Linux and macOS against the Hermes floor (`requires_hermes`), the latest release and `main`: `hermes plugins validate`, `hermes plugins doctor`, `scripts/hermes_compat.py` (the Hermes names Snooze imports) and the tests; it sends a Telegram alert only when a result changes (secrets `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
+
 The repo-level [AGENTS.md](../AGENTS.md) describes code layout and contributor conventions.
