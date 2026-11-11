@@ -43,7 +43,7 @@ Reply `Ok` to the test reminder. Once the test passes, try your first snooze:
 About a minute later you receive a message like this, and a new one every minute until you answer:
 
 ```text
-🔔 Snooze #12: Drink a glass of water  (reply "Ok" / later)
+🔔 Snooze #12: Drink a glass of water  (reply "Ok" | later)
 ```
 
 Reply `Ok` when done: Snooze answers `✅ Done: Drink a glass of water` and stops. Reply `later 15` to postpone by 15 minutes. To cancel instead, use `/snooze cancel 12` with the ID in your reminder.
@@ -60,8 +60,11 @@ Every example repeats its reminder every 5 to 30 minutes until you answer (`Ok`,
 
 ```text
 /snooze Polish Zeus's thunderbolts in 20m every 10m
+→ reply: Ok | later
 /snooze Take a break, stand up in 50m every 5m ok done
+→ reply: done | later
 /snooze Cancel the streaming trial before it bills at 10:00 every 30m ok cancelled
+→ reply: cancelled | later
 ```
 
 ### 2. With a follow-up action (`then`)
@@ -70,7 +73,9 @@ Reply `Ok`: the agent gets the `then` text and does it, with the tools you gave 
 
 ```text
 /snooze Stop the rented GPU at 19:00 every 10m then shut down the instance and tell me what it cost
+→ reply: Ok | later
 /snooze Check last night's backup at 08:30 weekdays every 15m then run ./verify-backup.sh and show me the result
+→ reply: Ok | later
 ```
 
 ### 3. With choices (`ok a|b|c`)
@@ -79,10 +84,29 @@ Each reminder lists the options. Reply with an option or its number: the agent g
 
 ```text
 /snooze Refactor done. Merge? in 30m every 10m ok merge|review then do what I picked
+→ reply: merge | review | later   (or 1 | 2)
 /snooze Ship to production? at 17:30 every 10m ok ship|hold then if I chose ship, run ./deploy.sh prod and announce it with my release-notes skill
+→ reply: ship | hold | later   (or 1 | 2)
 ```
 
 For every clause and rule, see the [user guide](docs/user-guide.md#create-a-snooze).
+
+## Keywords
+
+Type these after `/snooze <what>`, in any order; put `then` last. Details: [user guide](docs/user-guide.md#create-a-snooze).
+
+| Keyword | What it does | Example |
+|---|---|---|
+| `at <time>` | First reminder at a time of day | `at 16:00` |
+| `in <duration>` | First reminder after a delay | `in 30m` |
+| `every <duration>` | Time between reminders (default 10m) | `every 5m` |
+| `daily` (or `everyday`) / `weekdays` / `every <days>` | Repeat every day, Monday to Friday, or on listed days (`monday-friday` is a range; `mon` works too) | `at 8am daily`, `at 8am weekdays`, `at 8am every monday,thursday` |
+| `on <day>` | One time, on the next such day | `at 9am on monday` |
+| `until <time>` | Stop reminding at this time | `until 18:00` |
+| `via <platform>` | Send to that platform's home channel (`telegram` or `discord`) | `via discord` |
+| `ok <answer>` | Confirm with a word, an emoji, or choices (`a\|b\|c`); the guide lists the rest | `ok done`, `ok ✅`, `ok merge\|review` |
+| `then <action>` | The agent does this after you confirm | `then run ./deploy.sh` |
+| `later [N]` | Reply in the chat to postpone N minutes (default: the `every` interval) | `later 15` |
 
 ## Limits
 

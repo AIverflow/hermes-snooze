@@ -25,6 +25,9 @@ class FakeCtx:
     def get_config(self, key, default=None):
         return self.config.get(key, default)
 
+    def set_config(self, key, value):
+        self.config[key] = value
+
     def register_command(self, name, handler, **kwargs):
         self.commands[name] = handler
 
@@ -41,11 +44,13 @@ class CliTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = Path(self.tmp.name) / "data"
         self.ctx = FakeCtx()
+        self.platforms = ["telegram"]
         self.commands = Commands(
             self.ctx,
             data_dir=lambda: self.data_dir,
             now=lambda: NOW,
             home_target=lambda platform=None: HOME,
+            home_platforms=lambda: self.platforms,
             session_env=lambda name: "",
             gateway_running=lambda: False,
         )
@@ -119,6 +124,11 @@ class CliTest(unittest.TestCase):
         self.assertIn("--wait does not work with a recurring snooze", stderr)
         self.assertEqual(Store(self.data_dir).load(), [])
 
+    def test_wait_accepts_on_day_because_it_is_one_time(self):
+        code, stdout, _stderr = self._run_waiting_add("Dentist at 9am on monday", [(DONE, "ok")])
+        self.assertEqual((code, stdout), (0, "ok\n"))
+        self.assertIsNone(Store(self.data_dir).get(1).schedule.days)
+
     def test_wait_pending_then_active_then_done(self):
         self.ctx.config["validate_setup"] = True
         code, stdout, _stderr = self._run_waiting_add("Dinner in 1m", [(ACTIVE, None), (ACTIVE, None), (DONE, "ready")])
@@ -140,6 +150,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertIn("No chat to send reminders to", stderr)
 
+    def test_add_help_shows_the_help_text_as_written(self):
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertRaises(SystemExit):
+            self.parser.parse_args(["add", "--help"])
+        for line in commands.HELP.splitlines():
+            self.assertIn(line, out.getvalue())
+
     def test_status_prints_state_and_answer_when_present(self):
         record, _message = self.commands.create_from_cli("Dinner in 1m ok asian|french")
         self.assertIsNotNone(record)
@@ -152,6 +169,40 @@ class CliTest(unittest.TestCase):
 
         Store(self.data_dir).update(finish)
         self.assertEqual(self.run_cli("status", str(record.id)), (0, "done\nfrench\n", ""))
+
+    def test_several_platforms_refuse_add_until_one_is_chosen(self):
+        self.platforms = ["telegram", "discord"]
+
+        code, stdout, stderr = self.run_cli("add", "Backup failed in 1m")
+        self.assertEqual((code, stdout), (2, ""))
+        self.assertIn("hermes snooze platform telegram|discord", stderr)
+        self.assertIn("via <platform>", stderr)
+        self.assertEqual(Store(self.data_dir).load(), [])
+
+        self.assertEqual(self.run_cli("platform", "TELEGRAM")[0], 0)
+        self.assertEqual(self.ctx.config["notification_platform"], "telegram")
+        code, stdout, _stderr = self.run_cli("add", "Backup failed in 1m")
+        self.assertEqual((code, stdout), (0, "1\n"))
+
+    def test_platform_shows_and_sets_the_default(self):
+        code, stdout, _ = self.run_cli("platform")
+        self.assertEqual(code, 0)
+        self.assertIn("Default platform: the chat where you type (source)", stdout)
+
+        self.assertEqual(
+            self.run_cli("platform", "source"), (0, "✅ Default platform: the chat where you type (source)\n", "")
+        )
+
+    def test_platform_without_a_home_channel_exits_two(self):
+        self.commands._home_target = lambda platform=None: None
+        code, stdout, stderr = self.run_cli("platform", "discord")
+        self.assertEqual((code, stdout), (2, ""))
+        self.assertIn("/sethome", stderr)
+        self.assertNotIn("notification_platform", self.ctx.config)
+
+    def test_platform_rejects_an_unknown_value(self):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.parser.parse_args(["platform", "matrix"])
 
     def test_status_unknown_or_invalid_id_exits_two(self):
         code, stdout, stderr = self.run_cli("status", "999")

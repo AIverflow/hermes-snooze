@@ -100,12 +100,19 @@ def platform_label(platform: str) -> str:
     return PLATFORM_LABELS.get(platform.lower(), platform.title())
 
 
+def default_platform_text(setting: str) -> str:
+    """The `notification_platform` setting in words: "the chat where you type (source)" or "Discord (home channel)"."""
+    if setting == "source":
+        return "the chat where you type (source)"
+    return f"{platform_label(setting)} (home channel)"
+
+
 def _stop_text(rule: Any) -> str:
     kind = rule.get("kind") if isinstance(rule, dict) else None
     value = rule.get("value", "") if isinstance(rule, dict) else ""
     if kind == "choice":
         options = [option.strip() for option in str(value).split("|") if option.strip()]
-        return "reply with one of: " + ", ".join(f"{index} {option}" for index, option in enumerate(options, 1))
+        return "reply with one of: " + " | ".join(f"{index} {option}" for index, option in enumerate(options, 1))
     if kind == "word":
         return f'reply "{value}"'
     if kind == "contains":
@@ -153,7 +160,7 @@ def render_echo(
         f"⏰ Snooze #{snooze.id} {'ready, not started' if pending else 'set'}",
         f"What:     {snooze.text}",
         f"When:     {', '.join(when)} ({zone})",
-        f'Stop it:  {_stop_text(snooze.confirm)} (or "later 30" to push it back)',
+        f'Stop it:  {_stop_text(snooze.confirm)} | "later 30" to push it back',
     ]
     if snooze.then:
         lines.append(f'Then:     the agent will "{snooze.then}" and tell you the result')
@@ -208,12 +215,12 @@ def reminder_text(snooze: Snooze, late_by: timedelta | None = None) -> str:
     if is_choice:
         options = [option.strip() for option in str(snooze.confirm.get("value", "")).split("|") if option.strip()]
     instruction = f"reply 1-{len(options)}" if is_choice else _stop_text(snooze.confirm)
-    tail = f"  ({instruction} / later)" if count == 1 else f" ({_ordinal(count)})"
+    tail = f"  ({instruction} | later)" if count == 1 else f" ({_ordinal(count)})"
     text = f"🔔 Snooze #{snooze.id}: {snooze.text}{tail}"
     if late_by is not None:
         text += f"\n⏰ late by {format_minutes(round(late_by.total_seconds() / 60))}"
     if is_choice:
-        text += "\n" + " · ".join(f"{index} {option}" for index, option in enumerate(options, 1))
+        text += "\n" + " | ".join(f"{index} {option}" for index, option in enumerate(options, 1))
     return text
 
 

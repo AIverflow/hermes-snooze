@@ -43,7 +43,7 @@ class ReminderTextTest(unittest.TestCase):
         )
 
     def test_first_reminder_says_how_to_answer(self):
-        self.assertEqual(echo.reminder_text(self.snooze()), '🔔 Snooze #14: Stretch  (reply "Ok" / later)')
+        self.assertEqual(echo.reminder_text(self.snooze()), '🔔 Snooze #14: Stretch  (reply "Ok" | later)')
 
     def test_first_reminder_instruction_matches_the_confirm_rule(self):
         cases = [
@@ -59,7 +59,7 @@ class ReminderTextTest(unittest.TestCase):
                 snooze.state = ACTIVE
                 snooze.last_sent_at = NOW.isoformat()
                 text = echo.reminder_text(snooze)
-                self.assertIn(f"({instruction} / later)", text)
+                self.assertIn(f"({instruction} | later)", text)
                 self.assertNotIn('reply "Ok"', text)
                 decision = confirm.match(answer, [snooze], confirm.Sender("telegram", "1", "1"))
                 self.assertEqual(decision.action, confirm.CONFIRM)
@@ -70,7 +70,7 @@ class ReminderTextTest(unittest.TestCase):
                 snooze = self.snooze()
                 snooze.confirm = {"kind": "choice", "value": "|".join(f"option{i}" for i in range(1, count + 1))}
                 text = echo.reminder_text(snooze)
-                self.assertIn(f"reply 1-{count} / later", text)
+                self.assertIn(f"reply 1-{count} | later", text)
                 self.assertIn(f"{count} option{count}", text)
 
     def test_next_reminders_are_numbered(self):
@@ -91,12 +91,12 @@ class ReminderTextTest(unittest.TestCase):
         snooze.confirm = {"kind": "choice", "value": "asian|french|italian"}
         self.assertEqual(
             echo.reminder_text(snooze),
-            "🔔 Snooze #14: Dinner?  (reply 1-3 / later)\n1 asian · 2 french · 3 italian",
+            "🔔 Snooze #14: Dinner?  (reply 1-3 | later)\n1 asian | 2 french | 3 italian",
         )
         snooze.sent_count = 1
         self.assertEqual(
             echo.reminder_text(snooze),
-            "🔔 Snooze #14: Dinner? (2nd)\n1 asian · 2 french · 3 italian",
+            "🔔 Snooze #14: Dinner? (2nd)\n1 asian | 2 french | 3 italian",
         )
 
     def test_missed_text(self):
@@ -141,7 +141,7 @@ class GatewayWarningTest(unittest.TestCase):
             confirm={"kind": "choice", "value": "asian|french|italian"},
         )
         text = echo.render_echo(sn, NOW, "this chat", False, 10, timedelta(minutes=10))
-        self.assertIn("Stop it:  reply with one of: 1 asian, 2 french, 3 italian", text)
+        self.assertIn('Stop it:  reply with one of: 1 asian | 2 french | 3 italian | "later 30" to push it back', text)
         self.assertIn("Answer in chat: reply with an option", text)
         self.assertNotIn("/snooze ok 1", text)
 

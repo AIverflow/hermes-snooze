@@ -17,8 +17,8 @@ One run of reminders for a snooze, from its first reminder to its answer or miss
 _Avoid_: instance, cycle
 
 **Recurrence**:
-The days on which a recurring snooze starts a new occurrence (every day, weekdays, or listed days). It is separate from the repeat interval between reminders within one occurrence.
-_Avoid_: repeat, every (those mean the interval between reminders)
+The days on which a recurring snooze starts a new occurrence (`daily`, `weekdays`, or `every <days>`). It is separate from the repeat interval between reminders within one occurrence (`every <duration>`).
+_Avoid_: repeat (that means the interval between reminders)
 
 **Confirm rule**:
 What the user must reply to answer an occurrence: `Ok`, a word, an emoji, a substring, anything, or one of several choices.

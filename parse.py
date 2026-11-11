@@ -16,7 +16,10 @@ from .confirm import normalize
 MIN_DURATION = timedelta(minutes=1)
 MAX_DURATION = timedelta(days=3650)  # about 10 years: far past any real reminder, far below datetime's limit
 
-_KEYWORDS = frozenset({"at", "in", "every", "until", "ok", "then"})
+# The platforms `via <platform>` accepts. `commands.py` checks the setting and the tool against it too.
+PLATFORMS = ("telegram", "discord")
+
+_KEYWORDS = frozenset({"at", "in", "every", "until", "ok", "via", "then"})
 _PREPOSITIONS = frozenset({"before", "by", "after", "around", "since", "from", "to"})
 _TIME_CLAUSES = frozenset({"at", "until"})
 _DURATION_CLAUSES = frozenset({"in", "every"})
@@ -24,11 +27,8 @@ _DURATION_CLAUSES = frozenset({"in", "every"})
 _SPOKEN_NUMBERS = frozenset(
     {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "half"}
 )
-_DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-_DAYS = {name: day for day, name in enumerate(_DAY_NAMES)}
-_FULL_DAY_NAMES = frozenset(
-    {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
-)  # not grammar: only used to word the `on <day>` error
+_DAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_DAYS = {name: day for day, name in enumerate(_DAY_NAMES)} | {name[:3]: day for day, name in enumerate(_DAY_NAMES)}
 
 _TIME_RE = re.compile(r"^(\d{1,2})(?::(\d{2}))?(am|pm)?$")
 # `\s*` lets a duration be one word ("2m") or words joined by `_join_number_units` ("1 h 30 min").
@@ -60,6 +60,9 @@ EXAMPLE_SHORT = "/snooze Wake up 8am 10m"
 EXAMPLE_LONG = "/snooze Wake up at 8am every 10m"
 EXAMPLE_IN = "/snooze Take my pill in 30m every 5m ok taken"
 EXAMPLE_RECURRING = "/snooze Take my pill at 8am daily"
+EXAMPLE_WEEKLY = "/snooze Water the plants at 8am every monday,thursday"
+EXAMPLE_ON_DAY = "/snooze Call the dentist at 9am on monday"
+EXAMPLE_VIA = "/snooze Water the plants at 8am daily via discord"
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,7 @@ class Spec:
     then: str | None
     tz: str
     days: frozenset[int] | None = None
+    platform: str | None = None  # `via <platform>`: send to that platform's home channel
 
 
 @dataclass(frozen=True)
@@ -155,7 +159,7 @@ def _next_occurrence(t: time, after: datetime, zone: _tzinfo) -> datetime:
 
 
 def parse_days(word: str) -> frozenset[int] | None:
-    """Parse cron-style weekday names, lists, and non-wrapping ranges."""
+    """Parse weekday names (``mon`` or ``monday``), lists, and non-wrapping ranges."""
     days: set[int] = set()
     for part in word.casefold().split(","):
         if "-" in part:
@@ -232,7 +236,9 @@ class _Clauses:
     every: timedelta | None = None
     until: time | None = None
     confirm: ConfirmRule | None = None
-    days: frozenset[int] | None = None
+    days: frozenset[int] | None = None  # weekly days: `daily`, `weekdays`, `every <days>`
+    on_day: int | None = None  # `on <day>`: one time, on the next such day
+    platform: str | None = None  # `via <platform>`
     start: str = ""  # the `at <time>` / `in <duration>` clause as written, for error messages
 
 
@@ -246,16 +252,18 @@ def _bad_length(what: str, duration: timedelta, example: str) -> ParseError | No
 
 
 def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
-    """Read ``at``, ``in``, ``every``, ``until`` and ``ok`` clauses from the end.
+    """Read ``at``, ``in``, ``every``, ``until``, ``on``, ``via`` and ``ok`` clauses from the end.
+
+    ``every`` takes a duration (the interval) or weekday names (the weekly days); each can appear once.
 
     Stops at the first thing that is not a valid clause, or that repeats one already read.
     """
     c = _Clauses(end=len(words))
     while c.end > 0:
-        if low[c.end - 1] in ("daily", "weekdays"):
-            if c.days is not None:
+        if low[c.end - 1] in ("daily", "everyday", "weekdays"):
+            if c.days is not None or c.on_day is not None:
                 break
-            c.days = frozenset(range(7)) if low[c.end - 1] == "daily" else frozenset(range(5))
+            c.days = frozenset(range(5)) if low[c.end - 1] == "weekdays" else frozenset(range(7))
             c.end -= 1
             continue
         if low[c.end - 1] == "ok":
@@ -279,13 +287,30 @@ def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
             if moment is None or c.until is not None:
                 break
             c.until = moment
+        elif keyword == "via":
+            if low[c.end - 1] not in PLATFORMS:
+                break  # `Go to Lyon via Dijon`: not a platform, so it stays in the text
+            if c.platform is not None:
+                return ParseError(
+                    f"`via` twice: pick one platform, not `{c.platform}` and `{low[c.end - 1]}`.", EXAMPLE_VIA
+                )
+            c.platform = low[c.end - 1]
         elif keyword == "on":
             days = parse_days(arg)
-            if days is None or c.days is not None:
+            if days is None or c.days is not None or c.on_day is not None:
                 break
-            c.days = days
+            if len(days) > 1:
+                return ParseError(f"`on {arg}` takes one day. For several days, use `every {arg}`.", EXAMPLE_WEEKLY)
+            (c.on_day,) = days
         elif keyword in ("in", "every"):
             duration = parse_duration(arg)
+            if duration is None and keyword == "every":
+                days = parse_days(arg)
+                if days is None or c.days is not None or c.on_day is not None:
+                    break
+                c.days = days
+                c.end -= 2
+                continue
             if duration is None:
                 break
             if keyword == "in" and (c.delay is not None or c.at is not None):
@@ -329,25 +354,6 @@ def _conflicting_start(c: _Clauses, words: list[str], low: list[str]) -> ParseEr
     )
 
 
-def _day_in_text(words: list[str], low: list[str]) -> ParseError | None:
-    """The text ends with ``on <day>`` (``on monday at 8am``): that is not a one-time date, show the weekly form."""
-    if len(words) < 3 or low[-2] != "on":
-        return None
-    day = low[-1]
-    if parse_days(day) is not None:
-        clause = f"on {day}"
-    elif day in _FULL_DAY_NAMES:
-        clause = f"on {day[:3]}"
-    else:
-        return None
-    prefix = " ".join(words[:-2])
-    return ParseError(
-        f"`{words[-2]} {words[-1]}` in the text does not pick a day: `/snooze` has no one-time date. "
-        "For a weekly reminder, use `on` with a 3-letter day after the time.",
-        f"/snooze {prefix} at 8am {clause}",
-    )
-
-
 def _shown(parts: list[str], limit: int) -> str:
     return " ".join(parts[:limit]) + (" ..." if len(parts) > limit else "")
 
@@ -379,6 +385,14 @@ def _diagnose_tail(words: list[str], low: list[str], end: int) -> ParseError | N
             continue
         if is_time and any(ch.isdigit() for ch in arg):
             return ParseError(f"`{words[j]} {arg}` is not a valid time. Use a form like 4pm or 16:00.", example)
+        if keyword == "every" and parse_days(arg) is not None:
+            return ParseError(
+                "Use `every <days>` once, and not together with `daily`, `weekdays` or `on <day>`.", EXAMPLE_WEEKLY
+            )
+        if keyword == "every" and arg.casefold() in ("day", "weekday"):
+            return ParseError(
+                f"`every {arg}` is not a clause. Use `daily` (or `everyday`) or `weekdays`.", EXAMPLE_RECURRING
+            )
         if not is_time and (keyword == "every" or any(ch.isdigit() for ch in arg) or arg.casefold() in _SPOKEN_NUMBERS):
             return ParseError(
                 f"`{words[j]} {_shown(tail, 3)}` is not a valid duration. "
@@ -454,6 +468,8 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
         return conflict
     if c.days is not None and c.delay is not None:
         return ParseError("A recurring snooze needs `at <time>`, not `in`.", EXAMPLE_RECURRING)
+    if c.on_day is not None and c.delay is not None:
+        return ParseError("`on <day>` needs `at <time>`, not `in`.", EXAMPLE_ON_DAY)
     if c.at is None and c.delay is None:
         error = _read_short_form(c, words, low)
         if error:
@@ -467,14 +483,10 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
             "Missing when to start: add `at <time>` or `in <duration>`.", EXAMPLE_LONG
         )
 
-    day_error = _day_in_text(words[: c.end], low[: c.end])
-    if day_error:
-        return day_error
-
     if c.delay is not None:
         first_at = now_utc + c.delay
-    elif c.days is not None:
-        first_at = next_on_days(c.at, now_utc, zone, c.days)
+    elif c.days is not None or c.on_day is not None:
+        first_at = next_on_days(c.at, now_utc, zone, c.days or frozenset({c.on_day}))
     else:
         first_at = _next_occurrence(c.at, now_utc, zone)
     until = _next_occurrence(c.until, first_at, zone) if c.until is not None else None
@@ -488,4 +500,5 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
         then=then_text,
         tz=tz_name,
         days=c.days,
+        platform=c.platform,
     )

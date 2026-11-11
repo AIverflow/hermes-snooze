@@ -7,7 +7,7 @@ For installation and your first snooze, start with the [README](../README.md#sta
 Use `/snooze` followed by the reminder text, a start time or delay, and optional clauses:
 
 ```text
-/snooze <what> (at <time> | in <duration>) [every <duration>] [until <time>] [daily | weekdays | on <days>] [ok <word> | ok <a>|<b>|…] [then <action>]
+/snooze <what> (at <time> | in <duration>) [every <duration>] [until <time>] [daily | everyday | weekdays | every <days> | on <day>] [via <platform>] [ok <word> | ok <emoji> | ok contains:<word> | ok any | ok <a>|<b>|…] [then <action>]
 ```
 
 Choose one of `at` or `in`; parentheses and brackets are notation, not text to type. The reminder text can be in any language; clause keywords are English. For a request in plain language, ask Hermes to create the snooze instead of using `/snooze` syntax.
@@ -18,12 +18,16 @@ Choose one of `at` or `in`; parentheses and brackets are notation, not text to t
 | `in <duration>` | First reminder after a delay. Use either `at` or `in`. |
 | `every <duration>` | Interval between reminders. Defaults to 10 minutes. |
 | `until <time>` | End time: the first such time after the first reminder. Without `until`, `cap_minutes` sets it. See [When a snooze stops](#when-a-snooze-stops). |
-| `daily`, `weekdays`, `on <days>` | Start a new occurrence every day, Monday to Friday, or on listed days (`mon,thu` or a range such as `mon-fri`); for example, `/snooze Water plants at 8am on mon,thu`. |
-| `ok <word>` | Require a word, emoji, contains rule, or any message. See [Confirmations](#confirmations). |
+| `daily` / `everyday` | Start a new occurrence every day (the two words are the same). |
+| `weekdays` | Start a new occurrence Monday to Friday. |
+| `every <days>` | Start a new occurrence each week on listed days (`monday,thursday`, or a range such as `monday-friday`; `mon,thu` and `mon-fri` work too); for example, `/snooze Water plants at 8am every monday,thursday`. It can be combined with `every <duration>`: `every monday every 10m`. |
+| `on <day>` | One-time snooze on the next such day at the `at` time (today if that time is still ahead); one day only, and `on monday,thursday` is refused (use `every`); for example, `/snooze Call the dentist at 9am on monday`. |
+| `via <platform>` | Send this snooze to that platform's home channel (`telegram` or `discord`) instead of the current chat; for example, `/snooze Water plants at 8am daily via discord`. Refused, with nothing set, if the platform has no home channel: run `/sethome` in the wanted chat there. Any other word after `via` stays in the text (`Go to Lyon via Dijon`). |
+| `ok <word>`, `ok <emoji>`, `ok contains:<word>`, `ok any` | Require a word, an emoji, a message containing the word, or any message. See [Confirmations](#confirmations). |
 | `ok <a>\|<b>\|…` | Require one of 2–9 distinct one-word options; for example, `ok cook\|takeaway\|restaurant`. |
 | `then <action>` | Ask the agent to do something after confirmation. See [Then-actions](#then-actions). |
 
-Times use the configured time zone, in forms such as `8am` or `16:00`. Durations are digits plus a unit (seconds, minutes or hours), such as `10m`, `1h30m` or `2 hours`; for example, `/snooze Call mom in 1 hour 30 minutes`. Units may be joined or separated by spaces. The minimum is one minute. A recurrence needs a start time (`at <time>` or a trailing time); it cannot be combined with `in <duration>`.
+Times use the configured time zone, in forms such as `8am` or `16:00`. Durations are digits plus a unit (seconds, minutes or hours), such as `10m`, `1h30m` or `2 hours`; for example, `/snooze Call mom in 1 hour 30 minutes`. Units may be joined or separated by spaces. The minimum is one minute. A recurrence or an `on <day>` needs a start time (`at <time>` or a trailing time); it cannot be combined with `in <duration>`.
 
 Scheduling and confirmation clauses can appear in any order after the reminder text. Put `then` last: everything after it is the action for the agent. The parser reads the other clauses from the end; text before the clauses is the reminder. For example, `Call mom before 6pm at 4pm` keeps `Call mom before 6pm` as the text. A short form such as `/snooze Wake up 8am 10m` means `at 8am every 10m`; a trailing time alone means `at` that time. A time after `before`, `by`, `after`, `around`, `since`, `from` or `to` stays part of the text. Clause keywords are case-insensitive. Keep extra commentary outside the command: a trailing word such as `please` is refused with an error naming it, and no reminder is created. The same goes for a duration that is not digits plus a unit (`every ten minutes`). A second `at` is accepted: the last `at` is the start and the earlier one stays in the reminder text, so `Meeting at 3pm at 2:30pm` rings at 2:30pm with the text `Meeting at 3pm`. `at` and `in` together (`at 16:00 in 30m`) are refused.
 
@@ -49,6 +53,7 @@ The creation reply summarizes the snooze, its schedule and destination. Every re
 | `/snooze cancel <id>` | Stop without confirming. |
 | `/snooze yes [id]` | Start a snooze waiting for setup confirmation. Without an ID, selects the newest one. |
 | `/snooze test` | Send one test reminder and check confirmation. |
+| `/snooze platform [telegram\|discord\|source]` | Show or set the default platform ([Setup and configuration](#setup-and-configuration)). Also `hermes snooze platform [name]`. |
 
 `later` is measured from now, except before the first reminder is sent, when it is measured from the first reminder's time. What it does to the end time is in [When a snooze stops](#when-a-snooze-stops). `/snooze test` sends within about 15 seconds; reply `Ok` within two minutes. It reports immediately if the gateway is not running for the profile. A bare `yes` works in a chat; from the CLI use `/snooze yes <id>`.
 
@@ -115,6 +120,15 @@ By default, reply `Ok` to confirm. The `ok` clause can change the rule:
 | `ok any` | Any message |
 | `ok <a>\|<b>\|…` | One of 2–9 distinct, non-empty options, by number or option text; the answer is passed to the then-action |
 
+Words to reply in the chat:
+
+| Reply | Effect |
+|---|---|
+| `Ok` (or your `ok` rule) | Confirm. |
+| `later [N]` | Postpone by `N` minutes; without `N`, by the `every` interval. |
+| `not now [N]` | Same as `later`. |
+| `yes` | Start a snooze waiting for setup confirmation. |
+
 Matching ignores case, extra spaces, punctuation, emoji skin tones and common check-mark variations. `OK!` matches the default rule, and `👍🏽` matches `ok 👍`; `✔️` matches `ok ✅`.
 
 `later`, `later 30`, `later 1h` and `not now` always postpone the snooze, even with `ok any`. For the default, word, emoji and choice rules, extra text can both confirm and continue to the agent: `ok, and book a table for 8`. For `any` and `contains`, the whole message is used as the answer and consumed.
@@ -127,7 +141,7 @@ Only replies from the chat the reminder was sent to count, and from its user whe
 
 ## Create from scripts
 
-Use the Hermes CLI to create a snooze without an agent call, then check its state later. The text uses the same grammar as `/snooze` and is sent to the profile's notification target:
+Use the Hermes CLI to create a snooze without an agent call, then check its state later. The text uses the same grammar as `/snooze` and is sent to the profile's home channel (see [Setup and configuration](#setup-and-configuration)):
 
 ```bash
 id=$(hermes snooze add "Backup failed in 1m")
@@ -194,13 +208,24 @@ plugins:
 | `cap_minutes` | `120` | Maximum time a snooze keeps sending reminders after its first one, unless `until` is set. |
 | `cap_reminders` | `10` | Maximum reminders sent per occurrence, including when `until` is set. |
 | `timezone` | `system` | IANA time zone (for example, `Europe/Paris`) or `system` for the machine's time zone. |
-| `notification_platform` | `source` | `source` sends to the originating chat; `telegram` or `discord` sends to that platform's Hermes home channel. |
+| `notification_platform` | `source` | The default platform: `source` (the table below), `telegram` or `discord`. |
 
-Hermes owns the home channel setting. Configure the bot and select its destination using Hermes' [Telegram setup](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram) or [Discord setup](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/discord). Then set `notification_platform` to the desired platform. This is one destination per profile; reminders created elsewhere, including from the CLI, go to that home channel. Restart the gateway after changing settings.
+Hermes owns the home channel setting. Configure the bot and select its destination using Hermes' [Telegram setup](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/telegram) or [Discord setup](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/discord) (`/sethome` in the wanted chat). Change `notification_platform` with `/snooze platform telegram|discord|source` or `hermes snooze platform ...`; it refuses a platform with no home channel. A change applies at once, with no restart.
+
+Where a new snooze goes, first match wins:
+
+| # | Case | Destination |
+|---|---|---|
+| 1 | The text has `via <platform>` | That platform's home channel. |
+| 2 | `notification_platform` is `telegram` or `discord` | That platform's home channel. |
+| 3 | A chat command, or the agent tool in a chat | That chat. |
+| 4 | The CLI or no chat | The only home channel. If several platforms have one, Snooze refuses until you run `hermes snooze platform telegram\|discord` or add `via <platform>`. |
+
+When several platforms have a home channel, `/snooze` alone shows the default platform and the `via` hint, and `/snooze list` names each snooze's platform.
 
 ## Agent tool
 
-The agent can create snoozes with `snooze_create`. It requires `text` and `first_at` (ISO 8601 in local time); `every`, `until`, `recurrence`, `confirm`, and `then` are optional. `recurrence` accepts `daily`, `weekdays`, or day lists and ranges. `confirm` accepts `ok`, a word, emoji, `any`, `contains:<word>`, or a `|`-separated choice. Its argument details live in the tool schema in `commands.py`; its response uses the same summary shown for a chat command.
+The agent can create snoozes with `snooze_create`. It requires `text` and `first_at` (ISO 8601 in local time); `every`, `until`, `recurrence`, `platform` (like `via`), `confirm`, and `then` are optional. `recurrence` accepts `daily`, `weekdays`, or day lists and ranges. `confirm` accepts `ok`, a word, emoji, `any`, `contains:<word>`, or a `|`-separated choice. Its argument details live in the tool schema in `commands.py`; its response uses the same summary shown for a chat command.
 
 ## Lifecycle and stored data
 

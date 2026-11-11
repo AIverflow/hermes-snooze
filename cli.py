@@ -7,7 +7,8 @@ import sys
 import time
 from typing import Any
 
-from .commands import Commands
+from .commands import HELP, Commands
+from .parse import PLATFORMS
 from .store import StoreError
 
 POLL_SECONDS = 2
@@ -15,7 +16,12 @@ POLL_SECONDS = 2
 
 def _setup(parser: argparse.ArgumentParser) -> None:
     actions = parser.add_subparsers(dest="action", required=True)
-    add_parser = actions.add_parser("add", help="Create a snooze")
+    add_parser = actions.add_parser(
+        "add",
+        help="Create a snooze",
+        description=HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     add_parser.add_argument("text", nargs="+", help="Snooze text using the /snooze grammar")
     add_parser.add_argument("--wait", action="store_true", help="Wait for an answer")
     add_parser.add_argument(
@@ -26,6 +32,12 @@ def _setup(parser: argparse.ArgumentParser) -> None:
     status_parser = actions.add_parser("status", help="Show a snooze's state and answer")
     status_parser.add_argument("id", help="Snooze ID")
     status_parser.set_defaults(_snooze_action="status")
+
+    platform_parser = actions.add_parser("platform", help="Show or set the default platform")
+    platform_parser.add_argument(
+        "value", nargs="?", type=str.lower, choices=[*PLATFORMS, "source"], help="Default platform; omit to show it"
+    )
+    platform_parser.set_defaults(_snooze_action="platform")
 
 
 def _wait(store, snooze_id: int, timeout: float, sleep_fn=time.sleep, clock=time.monotonic):
@@ -78,6 +90,11 @@ def _handler(commands: Commands, args: argparse.Namespace) -> int:
         print(record.id)
         print(message, file=sys.stderr)
         return 0
+
+    if args._snooze_action == "platform":
+        ok, reply = commands.platform(args.value)
+        print(reply, file=sys.stdout if ok else sys.stderr)
+        return 0 if ok else 2
 
     try:
         snooze_id = int(args.id)

@@ -87,7 +87,7 @@ class TickTest(TimerCase):
     def test_sends_a_due_reminder_and_schedules_the_next(self):
         sid = self.add()
         self.assertEqual(self.timer.tick(), 1)
-        self.assertEqual(self.sender.sent, [("telegram", "123", '🔔 Snooze #1: Take the pill  (reply "Ok" / later)')])
+        self.assertEqual(self.sender.sent, [("telegram", "123", '🔔 Snooze #1: Take the pill  (reply "Ok" | later)')])
         s = self.get(sid)
         self.assertEqual((s.state, s.sent_count, s.last_message_id), (ACTIVE, 1, "m1"))
         self.assertEqual(s.last_sent_at, iso(T0))

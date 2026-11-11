@@ -7,12 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from snooze import commands, confirm, echo, schedule
+from snooze import commands, confirm, echo, parse, schedule
 from snooze.commands import Commands
 from snooze.store import ACTIVE, CANCELLED, DONE, MISSED, PENDING, Schedule, Snooze, Store, Target
 
 NOW = datetime(2026, 11, 7, 10, 0, tzinfo=timezone.utc)  # 11:00 in Paris
 HOME = Target(platform="telegram", chat_id="999", user_id="999")
+DISCORD_HOME = Target(platform="discord", chat_id="channel-1", user_id=None)
 
 
 class FakeCtx:
@@ -25,6 +26,9 @@ class FakeCtx:
 
     def get_config(self, key, default=None):
         return self.config.get(key, default)
+
+    def set_config(self, key, value):
+        self.config[key] = value
 
     def register_command(self, name, handler, description="", args_hint="", argument_mode=None):
         self.commands[name] = handler
@@ -51,6 +55,8 @@ class Base(unittest.TestCase):
         self.dir = Path(tmp.name) / "data"
         self.now = NOW
         self.home = HOME
+        self.homes = {"discord": DISCORD_HOME, "telegram": HOME}  # per platform, for `via`
+        self.platforms = ["telegram"]  # the platforms that have a home channel: one, unless a test says otherwise
         self.env = {}
         self.paused = False
         self.gateway = True  # True, False or None (cannot tell)
@@ -59,7 +65,8 @@ class Base(unittest.TestCase):
             self.ctx,
             data_dir=lambda: self.dir,
             now=lambda: self.now,
-            home_target=lambda: self.home,
+            home_target=lambda platform=None: self.homes.get(platform) if platform else self.home,
+            home_platforms=lambda: self.platforms,
             session_env=lambda name: self.env.get(name, ""),
             is_paused=lambda: self.paused,
             gateway_running=lambda: self.gateway,
@@ -116,6 +123,15 @@ class CreateTest(Base):
         self.assertEqual(s.schedule.days, list(range(7)))
         self.assertEqual(s.schedule.span, 120)
         self.assertIn("daily at 8:00", reply)
+
+    def test_every_day_is_weekly_and_on_day_is_one_time(self):
+        weekly = self.run_cmd("Water the plants at 8am every monday", source=telegram_source())
+        once = self.run_cmd("Call the dentist on monday at 9am", source=telegram_source())
+        weekly_snooze, once_snooze = self.store.load()
+        self.assertEqual(weekly_snooze.schedule.days, [0])
+        self.assertIsNone(once_snooze.schedule.days)
+        self.assertIn("Mon at 8:00", weekly)
+        self.assertIn("Mon 9 Nov 09:00", once)
 
     def test_started_echo_has_no_yes_line_and_ends_with_undo(self):
         echo = self.run_cmd(self.FULL, source=telegram_source())
@@ -191,7 +207,7 @@ class ValidateSetupOnTest(Base):
 
     def test_choice_echo_lists_answer_options(self):
         echo = self.run_cmd("Dinner? in 30m ok asian|french|italian", source=telegram_source())
-        self.assertIn("reply with one of: 1 asian, 2 french, 3 italian", echo)
+        self.assertIn("reply with one of: 1 asian | 2 french | 3 italian", echo)
 
     def test_parse_error_sets_nothing(self):
         reply = self.run_cmd("Wake up", source=telegram_source())
@@ -201,7 +217,7 @@ class ValidateSetupOnTest(Base):
         self.assertEqual(self.store.load(), [])
 
     def test_empty_shows_help(self):
-        self.assertIn("Usage: /snooze", self.run_cmd(""))
+        self.assertEqual(self.run_cmd(""), commands.HELP)
         self.assertEqual(self.store.load(), [])
 
     def test_ids_increase(self):
@@ -258,18 +274,44 @@ class ParseErrorReplyTest(Base):
         record = self.create("Call mom before 6pm at 4pm")
         self.assertEqual(record.text, "Call mom before 6pm")
 
-    def test_help_requires_a_start_and_shows_the_short_form(self):
-        usage = self.run_cmd("").splitlines()[0]
-        self.assertIn("(at <time> | in <duration>)", usage)
-        self.assertNotIn("[at <time>", usage)
-        self.assertIn(commands._parse.EXAMPLE_SHORT, self.run_cmd(""))
+
+class HelpTest(Base):
+    EXAMPLES = (commands.EXAMPLE_SIMPLE, commands.EXAMPLE_ACTION, commands.EXAMPLE_CHOICE)
+
+    def test_help_shows_the_three_levels_with_their_replies(self):
+        text = self.run_cmd("")
+        for example in self.EXAMPLES:
+            self.assertIn(example, text)
+        self.assertIn("→ reply: Ok | later", text)
+        self.assertIn("→ reply: merge | review | later", text)
+
+    def test_help_examples_parse(self):
+        for example in self.EXAMPLES:
+            with self.subTest(example=example):
+                spec = parse.parse(example.removeprefix("/snooze "), NOW, "UTC")
+                self.assertNotIsInstance(spec, parse.ParseError)
+
+    def test_simple_and_action_replies_are_true(self):
+        sender = confirm.Sender("telegram", "123", "42")
+        for example in (commands.EXAMPLE_SIMPLE, commands.EXAMPLE_ACTION):
+            with self.subTest(example=example):
+                snooze = self.create(example.removeprefix("/snooze "))
+                self.assertEqual(confirm.match("Ok", sent([snooze]), sender).action, confirm.CONFIRM)
+                self.assertEqual(confirm.match("later", sent([snooze]), sender).action, confirm.LATER)
+
+    def test_choice_replies_are_true(self):
+        snooze = self.create(commands.EXAMPLE_CHOICE.removeprefix("/snooze "))
+        sender = confirm.Sender("telegram", "123", "42")
+        for reply in ("merge", "1", "review", "2", "later"):
+            with self.subTest(reply=reply):
+                self.assertNotEqual(confirm.match(reply, sent([snooze]), sender).action, confirm.NONE)
 
 
 class OkCommandTest(Base):
     def test_choice_requires_answer_in_chat_and_stays_active(self):
         snooze = self.add(confirm={"kind": "choice", "value": "asian|french|italian"})
         reply = self.run_cmd(f"ok {snooze.id}")
-        self.assertEqual(reply, f"#{snooze.id} needs an answer: reply 1 asian, 2 french, 3 italian in the chat.")
+        self.assertEqual(reply, f"#{snooze.id} needs an answer: reply 1 asian | 2 french | 3 italian in the chat.")
         self.assertEqual(self.store.get(snooze.id).state, ACTIVE)
         self.assertIsNone(self.store.get(snooze.id).answer)
 
@@ -311,6 +353,90 @@ class TargetTest(Base):
         reply = self.run_cmd("Wake up at 4pm every 10m", source=None)
         self.assertIn("No chat to send reminders to", reply)
         self.assertEqual(self.store.load(), [])
+
+
+class ViaTest(Base):
+    def test_command_via_sends_to_that_platforms_home_channel(self):
+        echo = self.run_cmd("Water the plants at 8am daily via discord", source=telegram_source())
+        s = self.store.load()[0]
+        self.assertEqual(s.target, DISCORD_HOME)
+        self.assertEqual(s.text, "Water the plants")
+        self.assertEqual(s.schedule.days, list(range(7)))
+        self.assertIn("Discord (home channel)", echo)
+
+    def test_via_beats_the_notification_platform_setting(self):
+        self.ctx.config["notification_platform"] = "telegram"
+        self.run_cmd("Wake up at 4pm via discord", source=telegram_source())
+        self.assertEqual(self.store.load()[0].target, DISCORD_HOME)
+
+    def test_creators_user_id_is_never_copied_to_the_target(self):
+        self.run_cmd("Wake up at 4pm via discord", source=telegram_source(user="42"))
+        self.assertIsNone(self.store.load()[0].target.user_id)
+
+    def test_home_channels_own_user_id_is_kept(self):
+        self.homes["discord"] = Target("discord", "channel-1", "owner-7")
+        self.run_cmd("Wake up at 4pm via discord", source=telegram_source(user="42"))
+        self.assertEqual(self.store.load()[0].target.user_id, "owner-7")
+
+    def test_via_without_home_channel_is_refused_and_nothing_is_stored(self):
+        self.homes = {}
+        reply = self.run_cmd("Wake up at 4pm via discord", source=telegram_source())
+        self.assertIn("No Discord home channel", reply)
+        self.assertIn("/sethome", reply)
+        self.assertIn("Nothing was set", reply)
+        self.assertEqual(self.store.load(), [])
+
+    def test_unknown_platform_stays_in_the_text(self):
+        self.run_cmd("Go to Lyon via Dijon at 4pm", source=telegram_source())
+        s = self.store.load()[0]
+        self.assertEqual((s.text, s.target.platform), ("Go to Lyon via Dijon", "telegram"))
+
+    def test_cli_via(self):
+        spec_text = "Wake up at 4pm via discord"
+        record, _ = self.cmds.create_from_cli(spec_text)
+        self.assertEqual(record.target, DISCORD_HOME)
+        self.homes = {}
+        record, message = self.cmds.create_from_cli(spec_text)
+        self.assertIsNone(record)
+        self.assertIn("/sethome", message)
+
+
+class ToolViaTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.env = {
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "123",
+            "HERMES_SESSION_USER_ID": "42",
+        }
+
+    def call(self, **args):
+        return json.loads(self.cmds.tool({"text": "Wake up", "first_at": "2026-11-07T16:00", **args}))
+
+    def test_platform_field_picks_the_home_channel(self):
+        result = self.call(platform="Discord")
+        self.assertTrue(result["ok"])
+        self.assertIn("Discord (home channel)", result["message"])
+        self.assertEqual(self.store.load()[0].target, DISCORD_HOME)
+
+    def test_no_platform_keeps_the_session_chat(self):
+        self.call()
+        self.assertEqual(self.store.load()[0].target, Target("telegram", "123", "42"))
+
+    def test_platform_without_home_channel_is_refused(self):
+        self.homes = {}
+        result = self.call(platform="discord")
+        self.assertIn("/sethome", result["error"])
+        self.assertEqual(self.store.load(), [])
+
+    def test_unknown_platform_is_refused(self):
+        for value in ("dijon", "whatsapp", 5):
+            with self.subTest(value=value):
+                self.assertIn("platform must be one of", self.call(platform=value)["error"])
+        self.assertEqual(self.store.load(), [])
+
+    def test_schema_lists_the_platform_field(self):
+        self.assertIn("platform", commands.TOOL_SCHEMA["parameters"]["properties"])
 
 
 class ConfirmRoundTripTest(Base):
@@ -898,6 +1024,10 @@ class ToolTest(Base):
         self.call(text="Wake up", first_at="2026-11-09T08:00", recurrence="weekdays")
         self.assertEqual(self.store.load()[0].schedule.days, [0, 1, 2, 3, 4])
 
+    def test_recurrence_everyday_is_daily(self):
+        self.call(text="Wake up", first_at="2026-11-07T16:00", recurrence="everyday")
+        self.assertEqual(self.store.load()[0].schedule.days, list(range(7)))
+
     def test_recurrence_moves_first_at_to_next_allowed_day_at_same_local_time(self):
         self.call(text="Wake up", first_at="2026-11-07T16:00", recurrence="mon,thu")
         s = self.store.load()[0]
@@ -906,7 +1036,9 @@ class ToolTest(Base):
 
     def test_invalid_recurrence_returns_error_without_creating(self):
         result = self.call(text="Wake up", first_at="2026-11-07T16:00", recurrence="someday")
-        self.assertEqual(result["error"], "recurrence must be daily, weekdays, or days such as mon,thu or mon-fri.")
+        self.assertEqual(
+            result["error"], "recurrence must be daily, weekdays, or days such as mon,thu or monday-friday."
+        )
         self.assertEqual(self.store.load(), [])
 
     def test_every_forms(self):
@@ -1052,6 +1184,171 @@ class MediaTagTest(Base):
     def test_text_without_tag_is_unchanged(self):
         self.create("Wake up at 4pm")
         self.assertEqual(self.store.load()[0].text, "Wake up")
+
+
+class SeveralPlatformsTest(Base):
+    """Telegram and Discord both have a home channel."""
+
+    def setUp(self):
+        super().setUp()
+        self.platforms = ["telegram", "discord"]
+
+    def add_one(self, **kw):
+        self.add(next_at=(NOW + timedelta(minutes=5)).isoformat(), **kw)
+
+    # the three outputs
+
+    def test_help_shows_the_default_platform_and_via(self):
+        for setting, default in (("source", "the chat where you type (source)"), ("discord", "Discord (home channel)")):
+            with self.subTest(setting=setting):
+                self.ctx.config["notification_platform"] = setting
+                lines = self.run_cmd("").splitlines()
+                self.assertEqual(lines[:-1], commands.HELP.splitlines())
+                self.assertEqual(
+                    lines[-1], f'Default platform: {default}. Per snooze: add "via telegram" or "via discord".'
+                )
+
+    def test_help_is_unchanged_with_one_platform(self):
+        self.platforms = ["telegram"]
+        self.assertEqual(self.run_cmd(""), commands.HELP)
+        self.platforms = []
+        self.assertEqual(self.run_cmd(""), commands.HELP)
+
+    def test_static_help_has_no_default_platform_line(self):
+        self.assertNotIn("Default platform", commands.HELP)
+
+    def test_echo_names_the_platform_for_a_chat_and_a_home(self):
+        self.assertIn("Where:    Telegram (this chat)", self.run_cmd("Wake up at 4pm", source=telegram_source()))
+        self.assertIn("Where:    Telegram (home channel)", self.run_cmd("Wake up at 4pm via telegram"))
+        self.assertIn("Where:    Discord (home channel)", self.run_cmd("Wake up at 4pm via discord"))
+
+    def test_list_names_each_platform(self):
+        self.add_one(text="Mine")
+        self.add_one(text="Theirs", target=DISCORD_HOME)
+        self.add_one(text="Waiting", state=PENDING, target=DISCORD_HOME)
+        reply = self.run_cmd("list")
+        self.assertIn("#1 Mine — Telegram, next today 11:05, 0 sent", reply)
+        self.assertIn("#2 Theirs — Discord, next today 11:05, 0 sent", reply)
+        self.assertIn("#3 Waiting — Discord, waiting for yes", reply)
+
+    def test_list_is_unchanged_with_one_platform(self):
+        self.platforms = ["telegram"]
+        self.add_one(text="Mine")
+        self.assertIn("#1 Mine — next today 11:05, 0 sent", self.run_cmd("list"))
+
+    # the CLI / no chat
+
+    def test_cli_is_refused_with_both_ways_to_choose(self):
+        record, message = self.cmds.create_from_cli("Wake up at 4pm")
+        self.assertIsNone(record)
+        self.assertIn("hermes snooze platform telegram|discord", message)
+        self.assertIn("via <platform>", message)
+        self.assertEqual(self.store.load(), [])
+
+    def test_command_without_a_chat_is_refused(self):
+        reply = self.run_cmd("Wake up at 4pm", source=None)
+        self.assertEqual(reply, commands.CHOOSE_PLATFORM_TEXT)
+        self.assertEqual(self.store.load(), [])
+
+    def test_test_command_without_a_chat_is_refused(self):
+        self.assertEqual(self.run_cmd("test", source=None), commands.CHOOSE_PLATFORM_TEXT)
+        self.assertEqual(self.store.load(), [])
+
+    def test_tool_without_a_chat_is_refused(self):
+        result = json.loads(self.cmds.tool({"text": "Wake up", "first_at": "2026-11-07T16:00"}))
+        self.assertIn("hermes snooze platform", result["error"])
+        self.assertEqual(self.store.load(), [])
+
+    def test_cli_escape_via(self):
+        record, _ = self.cmds.create_from_cli("Wake up at 4pm via discord")
+        self.assertEqual(record.target, DISCORD_HOME)
+
+    def test_cli_escape_after_platform_command(self):
+        self.assertEqual(self.cmds.platform("telegram")[0], True)
+        record, _ = self.cmds.create_from_cli("Wake up at 4pm")
+        self.assertEqual(record.target, HOME)
+
+    def test_with_one_platform_the_cli_uses_the_only_home(self):
+        self.platforms = ["telegram"]
+        record, _ = self.cmds.create_from_cli("Wake up at 4pm")
+        self.assertEqual(record.target, HOME)
+
+    # chats and priority are unchanged
+
+    def test_chat_command_answers_in_its_own_chat(self):
+        source = SimpleNamespace(platform=SimpleNamespace(value="discord"), chat_id=555, user_id=7)
+        self.assertEqual(self.create(source=source).target, Target("discord", "555", "7"))
+        self.assertEqual(self.create(source=telegram_source()).target, Target("telegram", "123", "42"))
+
+    def test_tool_in_a_chat_answers_in_that_chat(self):
+        self.env = {"HERMES_SESSION_PLATFORM": "discord", "HERMES_SESSION_CHAT_ID": "555"}
+        self.cmds.tool({"text": "Wake up", "first_at": "2026-11-07T16:00"})
+        self.assertEqual(self.store.load()[0].target, Target("discord", "555", None))
+
+    def test_setting_beats_the_chat_and_via_beats_the_setting(self):
+        self.ctx.config["notification_platform"] = "discord"
+        self.run_cmd("Wake up at 4pm", source=telegram_source())
+        self.run_cmd("Wake up at 5pm via telegram", source=telegram_source())
+        self.assertEqual([s.target for s in self.store.load()], [DISCORD_HOME, HOME])
+
+    def test_setting_applies_to_the_cli(self):
+        self.ctx.config["notification_platform"] = "discord"
+        record, _ = self.cmds.create_from_cli("Wake up at 4pm")
+        self.assertEqual(record.target, DISCORD_HOME)
+
+
+class PlatformCommandTest(Base):
+    def test_show_a_home_platform(self):
+        self.ctx.config["notification_platform"] = "discord"
+        self.assertEqual(
+            self.run_cmd("platform"),
+            "Default platform: Discord (home channel). Change: /snooze platform telegram | discord | source",
+        )
+
+    def test_show_source(self):
+        self.assertTrue(self.run_cmd("platform").startswith("Default platform: the chat where you type (source)."))
+
+    def test_set_each_value_through_the_ctx(self):
+        for value in ("telegram", "discord", "source"):
+            with self.subTest(value=value):
+                reply = self.run_cmd(f"platform {value.upper()}")
+                self.assertEqual(self.ctx.config["notification_platform"], value)
+                self.assertTrue(reply.startswith("✅ Default platform: "))
+                self.assertEqual(commands.read_settings(self.ctx).notification_platform, value)
+
+    def test_set_replies(self):
+        self.assertEqual(self.run_cmd("platform discord"), "✅ Default platform: Discord (home channel)")
+        self.assertEqual(self.run_cmd("platform source"), "✅ Default platform: the chat where you type (source)")
+
+    def test_platform_without_a_home_channel_is_refused_and_nothing_is_written(self):
+        self.homes = {"telegram": HOME}
+        reply = self.run_cmd("platform discord")
+        self.assertIn("No Discord home channel", reply)
+        self.assertIn("/sethome", reply)
+        self.assertNotIn("notification_platform", self.ctx.config)
+
+    def test_source_needs_no_home_channel(self):
+        self.homes = {}
+        self.run_cmd("platform source")
+        self.assertEqual(self.ctx.config["notification_platform"], "source")
+
+    def test_bad_value_gets_the_usage_line(self):
+        self.assertEqual(self.run_cmd("platform matrix"), commands.USAGE["platform"])
+        self.assertEqual(self.run_cmd("platform discord telegram"), commands.USAGE["platform"])
+        self.assertNotIn("notification_platform", self.ctx.config)
+
+    def test_a_save_error_is_reported(self):
+        self.ctx.set_config = mock.Mock(side_effect=PermissionError("managed install"))
+        self.assertIn("managed install", self.run_cmd("platform discord"))
+
+    def test_text_that_does_not_fit_is_still_a_reminder(self):
+        self.run_cmd("platform meeting at 4pm", source=telegram_source())
+        self.assertEqual(self.store.load()[0].text, "platform meeting")
+
+    def test_listed_in_help_and_usage(self):
+        self.assertIn("platform", commands.SUBCOMMANDS)
+        self.assertIn("platform", commands.HELP)
+        self.assertIn("platform", commands.USAGE)
 
 
 class SettingsTest(unittest.TestCase):

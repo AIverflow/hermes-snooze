@@ -1,3 +1,4 @@
+import dataclasses
 import unittest
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -363,10 +364,92 @@ class RecurrenceTest(unittest.TestCase):
         self.assertEqual(daily.days, frozenset(range(7)))
         self.assertEqual(weekdays.days, frozenset(range(5)))
 
-    def test_on_days(self):
-        self.assertEqual(parse("Water plants at 8am on mon,thu").days, frozenset({0, 3}))
-        self.assertEqual(parse("Water plants at 8am on mon-wed,fri").days, frozenset({0, 1, 2, 4}))
-        self.assertEqual(parse("Water plants at 8am on MON-FRI").days, frozenset(range(5)))
+    def test_everyday_is_daily_in_either_position_and_any_case(self):
+        for text in ("Take pill at 8am everyday", "Take pill everyday at 8am", "Take pill at 8am Everyday"):
+            with self.subTest(text=text):
+                s = parse(text)
+                self.assertIsInstance(s, p.Spec)
+                self.assertEqual(s.text, "Take pill")
+                self.assertEqual(s.days, frozenset(range(7)))
+                self.assertEqual(s, parse(text.replace("everyday", "daily").replace("Everyday", "daily")))
+
+    def test_everyday_with_another_day_word_is_refused_like_daily(self):
+        for text in ("Take pill at 8am everyday daily", "Take pill at 8am daily everyday"):
+            with self.subTest(text=text):
+                self.assertIsInstance(parse(text), p.ParseError)
+
+    def test_second_everyday_before_the_time_stays_in_the_text(self):
+        s = parse("Take pill everyday everyday at 8am")
+        self.assertEqual(s.text, "Take pill everyday")
+        self.assertEqual(s.days, frozenset(range(7)))
+
+    def test_every_days(self):
+        self.assertEqual(parse("Water plants at 8am every mon,thu").days, frozenset({0, 3}))
+        self.assertEqual(parse("Water plants at 8am every mon-wed,fri").days, frozenset({0, 1, 2, 4}))
+        self.assertEqual(parse("Water plants at 8am every MON-FRI").days, frozenset(range(5)))
+        self.assertEqual(parse("Water plants at 8am every monday-friday").days, frozenset(range(5)))
+
+    def test_every_day_and_every_interval_together(self):
+        for text in (
+            "Water the plants at 8am every monday every 10m",
+            "Water the plants at 8am every 10m every monday",
+            "Water the plants 8am 10m every monday",
+        ):
+            with self.subTest(text=text):
+                s = parse(text)
+                self.assertIsInstance(s, p.Spec)
+                self.assertEqual(s.text, "Water the plants")
+                self.assertEqual(s.days, frozenset({0}))
+                self.assertEqual(s.every, timedelta(minutes=10))
+
+    def test_every_days_keeps_the_interval_unset_and_combines_with_other_clauses(self):
+        s = parse("Water the plants at 8am every monday until 9am ok done then close it")
+        self.assertEqual(s.days, frozenset({0}))
+        self.assertIsNone(s.every)
+        self.assertEqual(s.confirm, p.ConfirmRule("word", "done"))
+        self.assertEqual(s.then, "close it")
+        self.assertEqual(s.until - s.first_at, timedelta(hours=1))
+
+    def test_two_day_clauses_are_not_both_read(self):
+        self.assertIsInstance(parse("X at 8am every monday every tuesday"), p.ParseError)
+        self.assertIsInstance(parse("X at 8am daily every monday"), p.ParseError)
+
+    def test_on_day_is_one_time_on_the_next_such_day(self):
+        s = parse("Call the dentist on monday at 9am")
+        self.assertIsInstance(s, p.Spec)
+        self.assertEqual(s.text, "Call the dentist")
+        self.assertIsNone(s.days)
+        self.assertEqual(s.first_at, paris(9, day=9))
+        self.assertEqual(parse("Call the dentist at 9am on Mon"), s)
+        self.assertEqual(parse("Call the dentist 9am on monday"), s)
+
+    def test_on_day_today_if_still_ahead_else_next_week(self):
+        # NOW is Saturday 10:00.
+        self.assertEqual(parse("Call the dentist at 11am on saturday").first_at, paris(11))
+        self.assertEqual(parse("Call the dentist at 9am on saturday").first_at, paris(9, day=14))
+
+    def test_on_several_days_is_refused_with_an_every_example(self):
+        for text in ("X at 8am on monday,thursday", "X at 8am on monday-friday"):
+            with self.subTest(text=text):
+                result = parse(text)
+                self.assertIsInstance(result, p.ParseError)
+                self.assertIn("every monday,thursday", result.example)
+
+    def test_second_days_clause_and_every_day_get_a_plain_error(self):
+        for text, part in (
+            ("X at 8am every monday every tuesday", "`every <days>` once"),
+            ("X at 8am every day", "`daily`"),
+            ("X at 8am every weekday", "`weekdays`"),
+        ):
+            with self.subTest(text=text):
+                result = parse(text)
+                self.assertIsInstance(result, p.ParseError)
+                self.assertIn(part, result.message)
+
+    def test_on_day_with_in_is_an_error(self):
+        result = parse("Call the dentist in 1h on monday")
+        self.assertIsInstance(result, p.ParseError)
+        self.assertIn("`in`", result.message)
 
     def test_invalid_range_stays_in_text(self):
         s = parse("Take pill at 8am on fri-mon")
@@ -378,17 +461,26 @@ class RecurrenceTest(unittest.TestCase):
         self.assertEqual(s.text, "Put the book on shelf")
         self.assertIsNone(s.days)
 
-    def test_on_day_in_text_is_an_error_with_the_weekly_form(self):
-        for text, example in (
-            ("Water the plants on monday at 8am", "/snooze Water the plants at 8am on mon"),
-            ("Water the plants on Friday at 8am", "/snooze Water the plants at 8am on fri"),
-            ("Water the plants on mon at 8am on thu", "/snooze Water the plants at 8am on mon"),
+    def test_full_and_short_day_names(self):
+        for text, days in (
+            ("Water the plants at 8am every monday", {0}),
+            ("Water the plants at 8am every Monday,thursday", {0, 3}),
+            ("Water the plants at 8am every mon,thursday", {0, 3}),
+            ("Water the plants at 8am every monday-friday", {0, 1, 2, 3, 4}),
+            ("Water the plants at 8am every mon-friday", {0, 1, 2, 3, 4}),
         ):
             with self.subTest(text=text):
-                e = parse(text)
-                self.assertIsInstance(e, p.ParseError)
-                self.assertEqual(e.example, example)
-                self.assertIsInstance(parse(e.example.removeprefix("/snooze ")), p.Spec)
+                s = parse(text)
+                self.assertIsInstance(s, p.Spec)
+                self.assertEqual(s.text, "Water the plants")
+                self.assertEqual(s.days, frozenset(days))
+
+    def test_bad_day_names_are_refused(self):
+        self.assertIsNone(p.parse_days("funday"))
+        self.assertIsNone(p.parse_days("monday-sunday-tuesday"))
+        self.assertIsNone(p.parse_days("friday-monday"))
+        self.assertIsNone(p.parse_days("monday,"))
+        self.assertIsInstance(parse("Water the plants at 8am on funday"), p.ParseError)
 
     def test_day_name_without_on_stays_in_text(self):
         s = parse("Prepare for Monday at 3pm")
@@ -427,6 +519,63 @@ class RecurrenceTest(unittest.TestCase):
         s = parse("X at 4pm every 1 h 30 min")
         self.assertEqual(s.text, "X")
         self.assertEqual(s.every, timedelta(minutes=90))
+
+
+class ViaTest(unittest.TestCase):
+    def test_via_platform_is_read_in_lowercase(self):
+        for text in ("Water at 8am via discord", "Water at 8am via Discord", "Water via DISCORD at 8am"):
+            with self.subTest(text=text):
+                s = parse(text)
+                self.assertEqual((s.text, s.platform), ("Water", "discord"))
+        self.assertEqual(parse("Water at 8am via telegram").platform, "telegram")
+
+    def test_no_via_means_no_platform(self):
+        self.assertIsNone(parse("Water at 8am").platform)
+
+    def test_unknown_platform_leaves_via_in_the_text(self):
+        s = parse("Go to Lyon via Dijon at 8am")
+        self.assertEqual((s.text, s.platform), ("Go to Lyon via Dijon", None))
+        self.assertIsInstance(parse("Go to Lyon at 8am via Dijon"), p.ParseError)  # a stray tail, like `please`
+
+    def test_text_ending_in_a_platform_name_without_via_is_text(self):
+        s = parse("Post the release notes to discord at 8am")
+        self.assertEqual((s.text, s.platform), ("Post the release notes to discord", None))
+
+    def test_via_twice_is_refused(self):
+        for text in ("Water at 8am via discord via telegram", "Water at 8am via discord via discord"):
+            with self.subTest(text=text):
+                result = parse(text)
+                self.assertIsInstance(result, p.ParseError)
+                self.assertIn("`via` twice", result.message)
+
+    def test_via_in_any_order_with_the_other_clauses(self):
+        base = parse("Water the plants at 8am every monday every 10m until 9am ok done")
+        for text in (
+            "Water the plants via discord at 8am every monday every 10m until 9am ok done",
+            "Water the plants at 8am via discord every monday every 10m until 9am ok done",
+            "Water the plants at 8am every monday every 10m until 9am ok done via discord",
+            "Water the plants at 8am every monday ok done every 10m via discord until 9am",
+            "Water the plants at 8am via discord ok done until 9am every 10m every monday",
+        ):
+            with self.subTest(text=text):
+                s = parse(text)
+                self.assertEqual(s, dataclasses.replace(base, platform="discord"))
+
+    def test_via_with_on_day_daily_and_short_form(self):
+        self.assertEqual(parse("Call at 9am on monday via discord").platform, "discord")
+        self.assertEqual(parse("Call at 9am via discord daily").days, frozenset(range(7)))
+        s = parse("Wake up 8am 10m via discord")
+        self.assertEqual((s.text, s.every, s.platform), ("Wake up", timedelta(minutes=10), "discord"))
+        s = parse("Wake up in 30m via discord ok")
+        self.assertEqual((s.text, s.platform), ("Wake up", "discord"))
+
+    def test_via_before_then_and_then_keeps_its_text(self):
+        s = parse("Send the report at 4pm via discord then post it via telegram")
+        self.assertEqual((s.text, s.platform), ("Send the report", "discord"))
+        self.assertEqual(s.then, "post it via telegram")
+
+    def test_via_alone_is_missing_text(self):
+        self.assertIsInstance(parse("via discord at 8am"), p.ParseError)
 
 
 class DstTest(unittest.TestCase):
