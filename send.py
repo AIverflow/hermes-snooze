@@ -101,6 +101,7 @@ class _Job:
     target: Target
     text: str
     next_at: str | None  # the snooze's `next_at` when picked, to notice a `later` made during the send
+    first_at: str  # the snooze's `schedule.first_at` when picked: it changes when a recurring snooze is re-armed
 
 
 @dataclass
@@ -177,7 +178,7 @@ class Timer:
                 snooze.state = MISSED
             else:
                 continue
-            jobs.append(_Job(snooze.id, action, snooze.target, text, snooze.next_at))
+            jobs.append(_Job(snooze.id, action, snooze.target, text, snooze.next_at, snooze.schedule.first_at))
         return jobs
 
     def _send(self, job: _Job) -> _Result:
@@ -197,6 +198,8 @@ class Timer:
             snooze = by_id.get(result.job.snooze_id)
             if snooze is None:
                 continue
+            if result.job.action.kind == SEND and snooze.schedule.first_at != result.job.first_at:
+                continue  # answered and re-armed while sending: this message or error belongs to a finished occurrence
             if result.error is not None:
                 snooze.last_error = result.error  # a failed reminder keeps its due time: the next tick retries it
                 continue

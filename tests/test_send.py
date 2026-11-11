@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from snooze import send
+from snooze import schedule, send
 from snooze.store import ACTIVE, DONE, MISSED, PENDING, Schedule, SenderLock, Snooze, Store, Target
 
 T0 = datetime(2026, 11, 7, 17, 0, tzinfo=timezone.utc)
@@ -265,6 +265,30 @@ class LockTest(TimerCase):
         self.timer.tick()
         s = self.get(sid)
         self.assertEqual((s.state, s.sent_count), (DONE, 1))
+
+    def test_recurring_answered_during_the_send_keeps_the_rearmed_occurrence(self):
+        sid = self.add(
+            schedule=Schedule(
+                first_at=iso(T0), every=10, until=iso(T0 + timedelta(hours=1)), tz="UTC", days=list(range(7)), span=60
+            ),
+        )
+        self.sender.during = lambda: self.store.update(lambda txn: schedule.rearm(txn.get(sid), self.now))
+        self.timer.tick()
+        s = self.get(sid)
+        tomorrow = iso(T0 + timedelta(days=1))
+        self.assertEqual((s.state, s.next_at, s.schedule.first_at), (ACTIVE, tomorrow, tomorrow))
+        self.assertEqual((s.sent_count, s.last_sent_at, s.last_message_id), (0, None, None))
+
+    def test_recurring_failed_send_after_the_rearm_leaves_no_error_on_the_next_occurrence(self):
+        sid = self.add(
+            schedule=Schedule(
+                first_at=iso(T0), every=10, until=iso(T0 + timedelta(hours=1)), tz="UTC", days=list(range(7)), span=60
+            ),
+        )
+        self.sender.fail = "chat not found"
+        self.sender.during = lambda: self.store.update(lambda txn: schedule.rearm(txn.get(sid), self.now))
+        self.timer.tick()
+        self.assertIsNone(self.get(sid).last_error)
 
     def test_later_during_the_send_keeps_the_new_time(self):
         sid = self.add()

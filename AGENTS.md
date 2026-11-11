@@ -2,6 +2,8 @@
 
 Hermes Agent plugin: a reminder that repeats on your phone until you confirm (word, emoji, reaction), then can hand a follow-up to the agent. Zero LLM calls per reminder.
 
+If an `AGENTS.local.md` exists next to this file, read it too: the maintainer's private rules (git-ignored).
+
 ## Language
 
 Domain terms (snooze, reminder, occurrence, confirm rule, ...) are defined in `CONTEXT.md`. Use them in code, docs and tickets.

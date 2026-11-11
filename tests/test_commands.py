@@ -538,6 +538,14 @@ class LaterTest(Base):
         self.run_cmd("later 15m")
         self.assertEqual(self.store.load()[0].next_at, "2026-11-07T11:15:00+00:00")
 
+    def test_later_too_long_is_refused_and_changes_nothing(self):
+        self.add()
+        before = self.store.load()[0].next_at
+        for delay in ("87601h", "999999999999999h", "9" * 5000 + "m"):
+            with self.subTest(delay=delay[:20]):
+                self.assertIn("/snooze later", self.run_cmd(f"later {delay}"))
+                self.assertEqual(self.store.load()[0].next_at, before)
+
     def test_later_without_number_uses_the_interval(self):
         self.add(schedule=Schedule(first_at=NOW.isoformat(), every=7, tz="Europe/Paris"))
         self.run_cmd("later")
@@ -830,6 +838,13 @@ class ToolTest(Base):
             "HERMES_SESSION_CHAT_ID": "123",
             "HERMES_SESSION_USER_ID": "42",
         }
+
+    def test_every_too_long_is_an_error(self):
+        for every in ("87601h", "999999999999999h", 5256001, "9" * 5000):
+            with self.subTest(every=str(every)[:20]):
+                result = self.call(text="Wake up", first_at="2026-11-07T16:00", every=every)
+                self.assertIn("every must be", result["error"])
+        self.assertEqual(self.store.load(), [])
 
     def test_creates_a_pending_snooze_with_echo(self):
         self.ctx.config["validate_setup"] = True

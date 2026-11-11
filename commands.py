@@ -232,9 +232,9 @@ def _parse_id(token: str) -> int | None:
 
 
 def _duration(text: str) -> timedelta | None:
-    """A duration such as "30m" or "1h30m" of at least one minute, else None."""
+    """A duration such as "30m" or "1h30m" of at least one minute and at most `MAX_DURATION`, else None."""
     delta = _parse.parse_duration(text.strip())
-    return delta if delta and delta >= _parse.MIN_DURATION else None
+    return delta if delta and _parse.MIN_DURATION <= delta <= _parse.MAX_DURATION else None
 
 
 def _minutes_arg(token: str) -> float | None:
@@ -595,7 +595,7 @@ class Commands:
             every = self._tool_every(args["every"])
             if every is None:
                 return {
-                    "error": "every must be a number of minutes or a duration such as 10m or 1h30m (minimum 1 minute)."
+                    "error": "every must be a number of minutes or a duration such as 10m or 1h30m (1 min to 10 years)."
                 }
 
         rule = _confirm_rule(args.get("confirm"))
@@ -658,7 +658,7 @@ class Commands:
             return None
         if isinstance(value, (int, float)):
             delta = timedelta(minutes=value)
-            return delta if delta >= _parse.MIN_DURATION else None
+            return delta if _parse.MIN_DURATION <= delta <= _parse.MAX_DURATION else None
         text = str(value).strip()
         if text.isdigit():
             text += "m"

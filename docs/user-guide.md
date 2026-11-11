@@ -119,7 +119,7 @@ Matching ignores case, extra spaces, punctuation, emoji skin tones and common ch
 
 `later`, `later 30`, `later 1h` and `not now` always postpone the snooze, even with `ok any`. For the default, word, emoji and choice rules, extra text can both confirm and continue to the agent: `ok, and book a table for 8`. For `any` and `contains`, the whole message is used as the answer and consumed.
 
-For a choice, every reminder shows numbered options; reply with the number or option text. The selected option word is passed to the then-action. `/snooze ok <id>` cannot answer a choice; reply in the chat instead. On a recurring snooze, `later` delays only today's occurrence; it does not move the next scheduled day.
+For a choice, every reminder shows numbered options; reply with the number or option text. The selected option word is passed to the then-action. `/snooze ok <id>` cannot answer a choice; reply in the chat instead. On a recurring snooze, `later` delays only today's occurrence; it does not move the next scheduled day. A `later` that goes past the next scheduled time replaces that next occurrence: `later 25h` on a daily 08:00 snooze means no reminder at 08:00 tomorrow.
 
 A reply to a snooze's latest reminder message selects that snooze. Any other message, including a reply to an older message, selects the active snooze that sent a reminder most recently. A reaction counts only on the latest reminder message. Slash commands continue to Hermes and are not treated as answers. A whole-message `yes` starts the newest snooze waiting for setup confirmation.
 

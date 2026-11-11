@@ -12,48 +12,9 @@ hermes-snooze sends its reminders through a messaging platform, so **Hermes need
 |---|---|
 | Telegram | ✅ Tested (private chat) |
 | Discord | 🔧 In progress |
-| Other Hermes platforms (Slack, Signal, …) | 🙋 Testers wanted |
+| Other Hermes platforms (Slack, Signal, …) | ❔ Untested, may work |
 
 WhatsApp Cloud API is not supported.
-
-## What you can do
-
-Every example repeats its reminder every 10 to 15 minutes until you answer `Ok`, or until a limit is reached.
-
-### 1. Simple
-
-```text
-/snooze Polish Zeus's thunderbolts in 20m every 10m
-/snooze Drink your ambrosia at 8am daily every 10m
-/snooze Deliver the messages from Olympus at 16:00 every 15m until 18:00
-/snooze Polish my winged sandals at 20:00 weekdays every 10m
-```
-
-### 2. With a follow-up action (`then`)
-
-Reply `Ok`: the agent gets the `then` text and does it, with the tools you gave it: write files, send email, edit Google Docs, run scripts, run skills…
-
-```text
-/snooze Steal Apollo's cattle at 23:00 every 10m then write my alibi to alibi.md
-/snooze Invent the lyre in 1h every 10m then create a Google Doc called "Lyre v1" with a short ode to it
-/snooze Send Zeus's love letter in 30m every 10m then email hera@olympus.example that I was delivering messages all night
-/snooze Review the release notes at 17:00 every 10m then push main, tag the release and run my social-media skill to announce it
-/snooze Check last night's backup at 08:30 weekdays every 15m then run ./verify-backup.sh and show me the result
-```
-
-### 3. With choices (`ok a|b|c`)
-
-Each reminder lists the options. Reply with an option or its number: the agent gets your choice.
-
-```text
-/snooze Whom do I bless today? in 10m every 10m ok merchant|traveler|thief then add my choice to blessings.md
-/snooze Dinner on Olympus at 18:30 every 10m ok ambrosia|nectar|feast then add my choice to the Google Doc "Olympus menu"
-/snooze Zeus is calling. Pick up? in 5m every 10m ok answer|hide then email zeus@olympus.example my choice
-/snooze Nightly backup failed. Retry? in 5m every 10m ok retry|skip then if I chose retry, run ./backup.sh and show me the log
-/snooze Ship to production? at 17:30 every 10m ok ship|hold then if I chose ship, run ./deploy.sh prod and announce it with my release-notes skill
-```
-
-For every clause and rule, see the [user guide](docs/user-guide.md#create-a-snooze).
 
 ## Install
 
@@ -76,24 +37,58 @@ In a Telegram private chat or Discord chat already connected to Hermes, check de
 Reply `Ok` to the test reminder. Once the test passes, try your first snooze:
 
 ```text
-/snooze Wake Zeus up in 1m every 1m
+/snooze Drink a glass of water in 1m every 1m
 ```
 
 About a minute later you receive a message like this, and a new one every minute until you answer:
 
 ```text
-🔔 Snooze #12: Wake Zeus up  (reply "Ok" / later)
+🔔 Snooze #12: Drink a glass of water  (reply "Ok" / later)
 ```
 
-Reply `Ok` when done: Snooze answers `✅ Done: Wake Zeus up` and stops. Reply `later 15` to postpone by 15 minutes. To cancel instead, use `/snooze cancel 12` with the ID in your reminder.
+Reply `Ok` when done: Snooze answers `✅ Done: Drink a glass of water` and stops. Reply `later 15` to postpone by 15 minutes. To cancel instead, use `/snooze cancel 12` with the ID in your reminder.
 
 You can also ask Hermes in plain language: "Remind me to update Hermes in 1 hour, then every 10 minutes until I confirm."
 
 For [setup](docs/user-guide.md#setup-and-configuration), [commands](docs/user-guide.md#commands), [confirmations](docs/user-guide.md#confirmations), [recurrence](docs/user-guide.md#create-a-snooze), and [script use](docs/user-guide.md#create-from-scripts), see the user guide.
+
+## What you can do
+
+Every example repeats its reminder every 5 to 30 minutes until you answer (`Ok`, or the word or choice the command asks for), or until a limit is reached.
+
+### 1. Simple
+
+```text
+/snooze Polish Zeus's thunderbolts in 20m every 10m
+/snooze Take a break, stand up in 50m every 5m ok done
+/snooze Cancel the streaming trial before it bills at 10:00 every 30m ok cancelled
+```
+
+### 2. With a follow-up action (`then`)
+
+Reply `Ok`: the agent gets the `then` text and does it, with the tools you gave it: write files, send email, edit Google Docs, run scripts, run skills…
+
+```text
+/snooze Stop the rented GPU at 19:00 every 10m then shut down the instance and tell me what it cost
+/snooze Check last night's backup at 08:30 weekdays every 15m then run ./verify-backup.sh and show me the result
+```
+
+### 3. With choices (`ok a|b|c`)
+
+Each reminder lists the options. Reply with an option or its number: the agent gets your choice.
+
+```text
+/snooze Refactor done. Merge? in 30m every 10m ok merge|review then do what I picked
+/snooze Ship to production? at 17:30 every 10m ok ship|hold then if I chose ship, run ./deploy.sh prod and announce it with my release-notes skill
+```
+
+For every clause and rule, see the [user guide](docs/user-guide.md#create-a-snooze).
 
 ## Limits
 
 - The Hermes gateway must be running on an awake machine for reminders and replies to work.
 - Snooze does not support voice-note confirmations or WhatsApp Cloud API.
 - Reaction confirmations are supported only in Telegram private chats.
-- At least one of Telegram or Discord must be configured in Hermes.
+- Snoozes belong to the Hermes profile: `/snooze list`, `/snooze ok` and `/snooze cancel` act on every snooze of the profile, whatever chat it was sent to, and anyone Hermes authorizes in that profile can use them. Replies in the chat only count in the reminder's own chat.
+
+![Snooze at a glance: how it works, with six example snoozes](docs/snooze-diagram.png)

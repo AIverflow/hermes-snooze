@@ -11,7 +11,10 @@ from datetime import datetime, time, timedelta, timezone
 from datetime import tzinfo as _tzinfo
 from zoneinfo import ZoneInfo
 
+from .confirm import normalize
+
 MIN_DURATION = timedelta(minutes=1)
+MAX_DURATION = timedelta(days=3650)  # about 10 years: far past any real reminder, far below datetime's limit
 
 _KEYWORDS = frozenset({"at", "in", "every", "until", "ok", "then"})
 _PREPOSITIONS = frozenset({"before", "by", "after", "around", "since", "from", "to"})
@@ -23,6 +26,9 @@ _SPOKEN_NUMBERS = frozenset(
 )
 _DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _DAYS = {name: day for day, name in enumerate(_DAY_NAMES)}
+_FULL_DAY_NAMES = frozenset(
+    {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+)  # not grammar: only used to word the `on <day>` error
 
 _TIME_RE = re.compile(r"^(\d{1,2})(?::(\d{2}))?(am|pm)?$")
 # `\s*` lets a duration be one word ("2m") or words joined by `_join_number_units` ("1 h 30 min").
@@ -107,8 +113,11 @@ def parse_duration(word: str) -> timedelta | None:
     word = word.casefold()
     if not _DURATION_RE.match(word):
         return None
-    seconds = sum(int(n) * _UNIT_SECONDS[u] for n, u in _DURATION_PART_RE.findall(word))
-    return timedelta(seconds=seconds)
+    try:
+        seconds = sum(int(n) * _UNIT_SECONDS[u] for n, u in _DURATION_PART_RE.findall(word))
+        return timedelta(seconds=seconds)
+    except (OverflowError, ValueError):  # a huge number (ValueError: over 4300 digits)
+        return timedelta.max  # callers reject anything above MAX_DURATION
 
 
 def _join_number_units(toks: list[tuple[str, int, int]], text: str) -> list[tuple[str, int, int]]:
@@ -192,10 +201,10 @@ def parse_ok_arg(arg: str) -> ConfirmRule | ParseError:
         if (
             not 2 <= len(options) <= 9
             or any(not any(c.isalnum() for c in option) for option in options)
-            or len({option.casefold() for option in options}) != len(options)
+            or len({normalize(option) for option in options}) != len(options)
         ):
             return ParseError(
-                "`ok` choices need 2 to 9 non-empty, distinct options (ignoring case).",
+                "`ok` choices need 2 to 9 non-empty, distinct options (ignoring case and punctuation).",
                 "/snooze Dinner? at 8pm ok asian|french|italian",
             )
         return ConfirmRule("choice", arg)
@@ -227,8 +236,13 @@ class _Clauses:
     start: str = ""  # the `at <time>` / `in <duration>` clause as written, for error messages
 
 
-def _too_short(what: str, example: str) -> ParseError:
-    return ParseError(f"`{what}` is too short: the minimum is 1 minute.", example)
+def _bad_length(what: str, duration: timedelta, example: str) -> ParseError | None:
+    """An error when ``duration`` is under the minimum or over the maximum, else None."""
+    if duration < MIN_DURATION:
+        return ParseError(f"`{what}` is too short: the minimum is 1 minute.", example)
+    if duration > MAX_DURATION:
+        return ParseError(f"`{what}` is too long: the maximum is {MAX_DURATION.days} days.", example)
+    return None
 
 
 def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
@@ -278,8 +292,9 @@ def _read_clauses(words: list[str], low: list[str]) -> _Clauses | ParseError:
                 break
             if keyword == "every" and c.every is not None:
                 break
-            if duration < MIN_DURATION:
-                return _too_short(f"{keyword} {arg}", EXAMPLE_LONG)
+            error = _bad_length(f"{keyword} {arg}", duration, EXAMPLE_LONG)
+            if error:
+                return error
             if keyword == "in":
                 c.delay = duration
                 c.start = f"{words[c.end - 2]} {arg}"
@@ -311,6 +326,25 @@ def _conflicting_start(c: _Clauses, words: list[str], low: list[str]) -> ParseEr
     return ParseError(
         f"Two start times: `{words[c.end - 2]} {arg}` and `{c.start}`. Use only one of `at` or `in`.",
         EXAMPLE_LONG if c.at is not None else EXAMPLE_IN,
+    )
+
+
+def _day_in_text(words: list[str], low: list[str]) -> ParseError | None:
+    """The text ends with ``on <day>`` (``on monday at 8am``): that is not a one-time date, show the weekly form."""
+    if len(words) < 3 or low[-2] != "on":
+        return None
+    day = low[-1]
+    if parse_days(day) is not None:
+        clause = f"on {day}"
+    elif day in _FULL_DAY_NAMES:
+        clause = f"on {day[:3]}"
+    else:
+        return None
+    prefix = " ".join(words[:-2])
+    return ParseError(
+        f"`{words[-2]} {words[-1]}` in the text does not pick a day: `/snooze` has no one-time date. "
+        "For a weekly reminder, use `on` with a 3-letter day after the time.",
+        f"/snooze {prefix} at 8am {clause}",
     )
 
 
@@ -370,8 +404,9 @@ def _read_short_form(c: _Clauses, words: list[str], low: list[str]) -> ParseErro
     if c.every is None and duration is not None:
         moment = time_ending_at(c.end - 1)
         if moment is not None:
-            if duration < MIN_DURATION:
-                return _too_short(last, EXAMPLE_SHORT)
+            error = _bad_length(last, duration, EXAMPLE_SHORT)
+            if error:
+                return error
             c.at, c.every, c.end = moment, duration, c.end - 2
             return None
     moment = time_ending_at(c.end)
@@ -431,6 +466,10 @@ def parse(text: str, now: datetime, tz: str | _tzinfo) -> Spec | ParseError:
         return _diagnose_tail(words, low, c.end) or ParseError(
             "Missing when to start: add `at <time>` or `in <duration>`.", EXAMPLE_LONG
         )
+
+    day_error = _day_in_text(words[: c.end], low[: c.end])
+    if day_error:
+        return day_error
 
     if c.delay is not None:
         first_at = now_utc + c.delay

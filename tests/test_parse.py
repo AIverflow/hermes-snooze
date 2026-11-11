@@ -129,7 +129,7 @@ class ConfirmTableTest(unittest.TestCase):
         self.assertEqual(self.confirm("ok asian|French|italian"), p.ConfirmRule("choice", "asian|French|italian"))
 
     def test_choice_invalid_options(self):
-        for arg in ("a|", "a|b|c|d|e|f|g|h|i|j", "a||b", "A|a", "|"):
+        for arg in ("a|", "a|b|c|d|e|f|g|h|i|j", "a||b", "A|a", "|", "ship|ship!", "Ship|ship ", "a-b|a b"):
             with self.subTest(arg=arg):
                 result = p.parse_ok_arg(arg)
                 self.assertIsInstance(result, p.ParseError)
@@ -279,6 +279,20 @@ class DurationTest(unittest.TestCase):
                 self.assertIsInstance(e, p.ParseError)
                 self.assertIn("1 minute", e.message)
 
+    def test_too_large_duration_is_error_not_crash(self):
+        for text in (
+            "Backup in 999999999999999h",
+            "Backup at 4pm every 999999999999999h",
+            "Backup 8am 999999999999999h",
+            "Backup in 99999999h",
+            "Backup in " + "9" * 5000 + "h",
+        ):
+            with self.subTest(text=text):
+                e = parse(text)
+                self.assertIsInstance(e, p.ParseError)
+                self.assertIn("too long", e.message)
+                self.assertTrue(e.example.startswith("/snooze "))
+
     def test_in_below_one_minute_is_error(self):
         self.assertIsInstance(parse("X in 30s"), p.ParseError)
 
@@ -362,6 +376,24 @@ class RecurrenceTest(unittest.TestCase):
     def test_on_shelf_stays_in_text(self):
         s = parse("Put the book on shelf at 8am")
         self.assertEqual(s.text, "Put the book on shelf")
+        self.assertIsNone(s.days)
+
+    def test_on_day_in_text_is_an_error_with_the_weekly_form(self):
+        for text, example in (
+            ("Water the plants on monday at 8am", "/snooze Water the plants at 8am on mon"),
+            ("Water the plants on Friday at 8am", "/snooze Water the plants at 8am on fri"),
+            ("Water the plants on mon at 8am on thu", "/snooze Water the plants at 8am on mon"),
+        ):
+            with self.subTest(text=text):
+                e = parse(text)
+                self.assertIsInstance(e, p.ParseError)
+                self.assertEqual(e.example, example)
+                self.assertIsInstance(parse(e.example.removeprefix("/snooze ")), p.Spec)
+
+    def test_day_name_without_on_stays_in_text(self):
+        s = parse("Prepare for Monday at 3pm")
+        self.assertIsInstance(s, p.Spec)
+        self.assertEqual(s.text, "Prepare for Monday")
         self.assertIsNone(s.days)
 
     def test_recurrence_with_in_is_an_error(self):
