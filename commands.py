@@ -602,6 +602,16 @@ class Commands:
         off = self._gateway_running() is False
         return echo.render_echo(record, now, where, settings.cap_reminders, PENDING_TIMEOUT, gateway_off=off)
 
+    def _cron_may_chain(self) -> bool:
+        """Whether a `then` may be queued now: outside a cron run, or with cron.allow_agent_scheduling."""
+        current = getattr(self._ctx, "current_cron_execution", None)  # missing on older Hermes: not in cron
+        if current is None or current() is None:
+            return True
+        from hermes_cli.config import load_config_readonly  # Hermes glue: lazy, so tests run without Hermes
+
+        cron = load_config_readonly().get("cron")  # read only: the dict is Hermes' shared cache
+        return isinstance(cron, dict) and cron.get("allow_agent_scheduling") is True
+
     def _create_from_tool(self, args: dict) -> dict:
         settings = read_settings(self._ctx)
         now = self._now()
@@ -660,6 +670,8 @@ class Commands:
 
         then = args.get("then")
         then = then.strip() if isinstance(then, str) and then.strip() else None
+        if then is not None and not self._cron_may_chain():
+            return {"error": "then is not allowed in a cron run unless cron.allow_agent_scheduling is true"}
 
         via = args.get("platform")
         if via not in (None, ""):

@@ -27,7 +27,9 @@ class RegisterTest(unittest.TestCase):
         self.assertIsNone(snooze.register(ctx))
         self.assertEqual(list(ctx.commands), ["snooze"])
         self.assertEqual(list(ctx.tools), ["snooze_create"])
-        self.assertEqual(sorted(ctx.hooks), ["gateway_platform_event", "pre_gateway_dispatch"])
+        self.assertEqual(
+            sorted(ctx.hooks), ["gateway_platform_event", "post_gateway_admission", "pre_gateway_dispatch"]
+        )
 
 
 if __name__ == "__main__":

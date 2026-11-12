@@ -150,7 +150,7 @@ For a choice, every reminder shows numbered options; reply with the number or op
 
 A reply to a snooze's latest reminder message selects that snooze. Any other message, including a reply to an older message, selects the active snooze that sent a reminder most recently. Slash commands continue to Hermes and are not treated as answers. A whole-message `yes` starts the newest snooze waiting for setup confirmation.
 
-Only replies from the chat the reminder was sent to count, and from its user when the snooze has one. For a home channel with no known user, any user Hermes authorizes in that chat can answer. Reactions do not carry a user ID, so reaction confirmation is accepted only for emoji rules in private chats and only on the latest reminder message.
+Only replies from the chat the reminder was sent to count, and from its user when the snooze has one. A snooze with no known user (made from the CLI or a script for a home channel) accepts an answer from anyone in that chat that Hermes lets through. Snooze reads that answer only after Hermes' own checks, so while the agent is busy in that chat, Hermes' busy rules come first, and replying to a given reminder does not select it. Reactions do not carry a user ID, so reaction confirmation is accepted only for emoji rules in private chats and only on the latest reminder message.
 
 ## Create from scripts
 
@@ -184,7 +184,7 @@ With `--wait`, exit codes are `0` for answered, `2` for an error or a recurring 
 
 ## Then-actions
 
-When a snooze with `then` is confirmed, Snooze reports that it is handing the action to the agent, then asks Hermes to continue in the same chat. A text confirmation is reused as the agent's message. A reaction or `/snooze ok` has no text to reuse, so Hermes must allow gateway injection.
+When a snooze with `then` is confirmed, Snooze reports that it is handing the action to the agent, then asks Hermes to continue in the same chat. A text confirmation is reused as the agent's message. A reaction, `/snooze ok` and an answer to a snooze with no known user (see [Confirmations](#confirmations)) instead queue a new agent turn, so Hermes must allow gateway injection.
 
 To enable that case, set `allow_gateway_injection: true` directly under the plugin entry (not under `settings`) in the active profile's `config.yaml`, then restart the gateway:
 

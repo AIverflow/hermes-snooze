@@ -145,6 +145,24 @@ class ReminderTextTest(unittest.TestCase):
                 snooze.confirm = rule
                 self.assertEqual(echo.reminder_text(snooze), '🔔 Snooze #14: Stretch  (reply "Ok" | later)')
 
+    def test_reminder_with_then_shows_the_then_line_on_every_send(self):
+        snooze = self.snooze()
+        snooze.then = "close ticket 42"
+        self.assertEqual(
+            echo.reminder_text(snooze), '🔔 Snooze #14: Stretch  (reply "Ok" | later)\nThen: close ticket 42'
+        )
+        snooze.sent_count = 1
+        self.assertEqual(echo.reminder_text(snooze), "🔔 Snooze #14: Stretch (2nd)\nThen: close ticket 42")
+
+    def test_then_line_comes_after_late_and_before_options(self):
+        snooze = self.snooze(1)
+        snooze.then = "order it"
+        snooze.confirm = {"kind": "choice", "value": "asian|french"}
+        self.assertEqual(
+            echo.reminder_text(snooze, timedelta(minutes=40)),
+            "🔔 Snooze #14: Stretch (2nd)\n⏰ late by 40 min\nThen: order it\n1 asian | 2 french",
+        )
+
     def test_missed_text(self):
         self.assertEqual(echo.missed_text(self.snooze(3)), "⌛ Missed: Stretch (3 reminders, no answer)")
         self.assertEqual(echo.missed_text(self.snooze(1)), "⌛ Missed: Stretch (1 reminder, no answer)")

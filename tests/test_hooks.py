@@ -53,10 +53,6 @@ class FakeInject:
         return self.accept
 
 
-def gateway(authorized=False):
-    return SimpleNamespace(_is_user_authorized_for_source=lambda source: authorized)
-
-
 def event(text, chat="123", user="42", platform=Platform.TELEGRAM, chat_type="dm", reply_to=None):
     source = SimpleNamespace(platform=platform, chat_id=chat, user_id=user, chat_type=chat_type, thread_id=None)
     return SimpleNamespace(text=text, source=source, reply_to_message_id=reply_to)
@@ -68,8 +64,6 @@ class Base(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(tmp.cleanup)
         self.dir = Path(tmp.name) / "data"
         self.store = Store(self.dir)
-        self.auth_calls = 0
-        self.authorized = False
         self.sender = FakeSender()
         self.inject = FakeInject()
         self.timer_starts = 0
@@ -79,16 +73,11 @@ class Base(unittest.IsolatedAsyncioTestCase):
             reply_grace=0,
             data_dir=lambda: self.dir,
             now=lambda: NOW,
-            authorizes=self._authorizes,
             sender=self.sender,
         )
 
     def _ensure_timer(self):
         self.timer_starts += 1
-
-    def _authorizes(self, gw, source):
-        self.auth_calls += 1
-        return self.authorized
 
     def add(self, state=ACTIVE, **kw):
         fields = dict(
@@ -109,8 +98,8 @@ class Base(unittest.IsolatedAsyncioTestCase):
     def stored(self, snooze):
         return self.store.get(snooze.id)
 
-    async def dispatch(self, ev, gw=None):
-        return await self.hooks.pre_gateway_dispatch(event=ev, gateway=gw or gateway())
+    async def dispatch(self, ev):
+        return await self.hooks.pre_gateway_dispatch(event=ev, gateway=SimpleNamespace())
 
     def sent(self):
         return [(chat, text) for _, chat, text in self.sender.sent]
@@ -373,7 +362,6 @@ class DispatchTest(Base):
             reply_grace=0,
             data_dir=lambda: self.dir,
             now=lambda: NOW,
-            authorizes=self._authorizes,
             sender=self.sender,
             cap_reminders=lambda: 2,
         )
@@ -555,7 +543,7 @@ class InvalidAnswerTest(Base):
         self.assertTrue(self.stored(s).awaiting_answer)
         self.assertEqual(self.sent(), [])
 
-    async def test_refused_sender_of_a_home_channel_snooze_is_not_answered(self):
+    async def test_home_channel_snooze_is_left_to_post_gateway_admission(self):
         s = self.add(target=Target("discord", "chan", None), awaiting_answer=True)
         ev = event("okkkk", chat="chan", platform=Platform.DISCORD, chat_type="group")
         self.assertIsNone(await self.dispatch(ev))
@@ -578,60 +566,93 @@ class InvalidAnswerTest(Base):
 
 
 class NoUserIdTest(Base):
-    """A snooze sent to a home channel has no user id: Hermes decides who may answer."""
+    """A snooze sent to a home channel has no user id: its answers come through post_gateway_admission."""
+
+    PROMPT = ThenTest.PROMPT
 
     def add(self, **kw):
         return super().add(target=Target("discord", "chan", None), **kw)
 
-    async def ask(self, text="ok", user="42"):
-        return await self.dispatch(event(text, chat="chan", user=user, platform=Platform.DISCORD, chat_type="group"))
+    @staticmethod
+    def source(chat="chan", user="42"):
+        """The `SessionSource.to_dict()` shape Hermes passes."""
+        return {"platform": "discord", "chat_id": chat, "chat_type": "group", "user_id": user, "thread_id": None}
 
-    async def test_authorized_sender_confirms(self):
-        self.authorized = True
+    async def admit(self, text="ok", **kw):
+        result = await self.hooks.post_gateway_admission(
+            session_key="k", platform="discord", source=self.source(**kw), message_id="9", text=text
+        )
+        await asyncio.gather(*hooks._background_tasks)
+        return result
+
+    async def test_pre_gateway_dispatch_does_not_confirm_it(self):
         s = self.add()
-        result = await self.ask()
-        self.assertEqual(result["action"], "skip")
+        ev = event("ok", chat="chan", platform=Platform.DISCORD, chat_type="group")
+        self.assertIsNone(await self.dispatch(ev))
+        self.assertEqual(self.stored(s).state, ACTIVE)
+
+    async def test_admitted_sender_confirms(self):
+        s = self.add()
+        self.assertEqual(await self.admit(), {"action": "handled"})
         self.assertEqual(self.stored(s).state, DONE)
         self.assertIsNone(self.stored(s).target.user_id)  # the record is not changed
         self.assertEqual(self.sent(), [("chan", "✅ Done: Wake up")])
+        self.assertEqual(self.inject.calls, [])
 
-    async def test_sender_hermes_refuses_is_ignored(self):
-        s = self.add()
-        self.assertIsNone(await self.ask())
+    async def test_then_is_injected_in_the_senders_chat(self):
+        s = self.add(then="start the coffee machine")
+        self.assertEqual(await self.admit(), {"action": "handled"})
+        self.assertEqual(self.stored(s).state, DONE)
+        self.assertEqual(self.sent(), [("chan", "✅ Done: Wake up. Now: start the coffee machine…")])
+        origin = {"platform": "discord", "chat_id": "chan", "chat_type": "group", "user_id": "42"}
+        self.assertEqual(self.inject.calls, [(self.PROMPT, origin)])
+
+    async def test_later_is_handled_without_then(self):
+        s = self.add(then="start the coffee machine")
+        self.assertEqual(await self.admit("later 30"), {"action": "handled"})
         self.assertEqual(self.stored(s).state, ACTIVE)
-        self.assertEqual(self.auth_calls, 1)
+        self.assertEqual(self.inject.calls, [])
 
-    async def test_no_check_when_the_message_is_not_an_answer(self):
-        self.add()
-        await self.ask("good morning")
-        self.assertEqual(self.auth_calls, 0)
+    async def test_invalid_first_reply_gets_the_list(self):
+        s = self.add(awaiting_answer=True)
+        self.assertEqual(await self.admit("okkkk"), {"action": "handled"})
+        self.assertFalse(self.stored(s).awaiting_answer)
+        self.assertIn("is not a valid answer", self.sent()[0][1])
+
+    async def test_other_message_passes_on(self):
+        s = self.add()
+        self.assertIsNone(await self.admit("good morning"))
+        self.assertIsNone(await self.admit("/snooze ok"))
+        self.assertEqual(self.stored(s).state, ACTIVE)
+
+    async def test_other_chat_passes_on(self):
+        s = self.add()
+        self.assertIsNone(await self.admit(chat="other"))
+        self.assertEqual(self.stored(s).state, ACTIVE)
 
     async def test_sender_without_user_id_is_ignored(self):
-        self.authorized = True
         s = self.add()
-        self.assertIsNone(await self.ask(user=None))
+        self.assertIsNone(await self.admit(user=None))
         self.assertEqual(self.stored(s).state, ACTIVE)
 
-    async def test_refused_sender_does_not_hide_an_exact_snooze(self):
+    async def test_snooze_with_an_owner_is_left_to_pre_gateway_dispatch(self):
+        s = super().add(target=Target("discord", "chan", "42"))
+        self.assertIsNone(await self.admit())
+        self.assertEqual(self.stored(s).state, ACTIVE)
+
+    async def test_owner_snooze_still_rewrites_next_to_an_owner_less_one(self):
         loose = self.add(text="Loose", last_sent_at=(NOW + timedelta(minutes=1)).isoformat())
-        exact = super().add(
-            text="Exact", target=Target("discord", "chan", "42"), last_message_id="5", last_sent_at=NOW.isoformat()
-        )
-        await self.ask()
+        exact = super().add(target=Target("discord", "chan", "42"), then="start the coffee machine")
+        ev = event("ok", chat="chan", platform=Platform.DISCORD, chat_type="group")
+        self.assertEqual(await self.dispatch(ev), {"action": "rewrite", "text": self.PROMPT})
         self.assertEqual(self.stored(loose).state, ACTIVE)
         self.assertEqual(self.stored(exact).state, DONE)
 
-    async def test_default_check_asks_the_gateway(self):
-        ev = event("ok", chat="chan", user="42", platform=Platform.DISCORD)
-        self.assertTrue(hooks.hermes_authorizes(gateway(authorized=True), ev.source))
-        self.assertFalse(hooks.hermes_authorizes(gateway(authorized=False), ev.source))
-        self.assertFalse(hooks.hermes_authorizes(SimpleNamespace(), ev.source))  # no such check: not authorized
-
-        def broken(source):
-            raise RuntimeError("boom")
-
+    async def test_broken_store_lets_the_message_through(self):
+        self.dir.mkdir()
+        (self.dir / "snoozes.json").write_text("{not json")
         with self.assertLogs("snooze.hooks", "WARNING"):
-            self.assertFalse(hooks.hermes_authorizes(SimpleNamespace(_is_user_authorized_for_source=broken), ev.source))
+            self.assertIsNone(await self.admit())
 
 
 class ReactionTest(Base):

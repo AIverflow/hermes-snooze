@@ -385,9 +385,13 @@ class HermesSenderTest(unittest.TestCase):
 class FakeTask:
     def __init__(self):
         self._done = False
+        self.cancelled = False
 
     def done(self):
         return self._done
+
+    def cancel(self):
+        self.cancelled = True
 
 
 class MayStartTest(unittest.TestCase):
@@ -434,9 +438,13 @@ class StartTest(unittest.TestCase):
             self.error = error
             self.spawned = []
             self.tasks = []
+            self.unload = []
 
         def get_config(self, key, default=None):
             return default
+
+        def on_unload(self, callback):
+            self.unload.append(callback)
 
         def spawn_task(self, coro, *, name=None):
             if self.error:
@@ -525,6 +533,22 @@ class StartTest(unittest.TestCase):
         self.assertEqual([hop_loop for _, hop_loop in self.hops], [loop])
         self.assertEqual(ctx.spawned, [])
         self.assertIn("started on the gateway loop", logs.output[0])
+
+    def test_unload_cancels_the_timer_on_the_gateway_loop(self):
+        ctx = self.Ctx()
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=FakeLoop()), self.data_dir(tmp), self.fake_hop():
+            self.assertTrue(send.start_timer(ctx))
+        self.assertEqual(len(ctx.unload), 1)
+        future = self.tasks[0]
+        self.assertFalse(future.cancelled)
+        ctx.unload[0]()
+        self.assertTrue(future.cancelled)
+
+    def test_a_hermes_without_on_unload_still_hops(self):
+        ctx = types.SimpleNamespace()
+        with tempfile.TemporaryDirectory() as tmp, self.gateway(loop=FakeLoop()), self.data_dir(tmp), self.fake_hop():
+            self.assertTrue(send.start_timer(ctx))
+        self.assertEqual(len(self.hops), 1)
 
     def test_a_second_call_does_not_hop_twice(self):
         ctx = self.Ctx()

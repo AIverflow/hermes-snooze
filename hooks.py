@@ -6,15 +6,19 @@ loads (and the tests run) without Hermes. What is accepted as an answer is decid
 commands (`commands.confirm_snooze`, `push_back_snooze`, `start_snooze`). The
 behaviour is documented in `docs/user-guide.md` ("Confirmations").
 
-Two hooks, both cheap when the chat has no running or waiting snooze (one small file
+Three hooks, all cheap when the chat has no running or waiting snooze (one small file
 read, no lock):
 
-- `pre_gateway_dispatch` (async): runs before authorization and before the busy-session
-  lane, so an answer counts while the agent is busy. An answer is dropped (`skip`), and so is
-  a message that is not an answer but belongs to a reminder (a reply to it, or the first
-  message after it): it gets the list of valid answers. Every other message passes on to the
-  agent. Slash commands are never read as an answer. If the snooze has a `then`, the answer
-  is rewritten into the agent turn instead (`then_prompt`).
+- `pre_gateway_dispatch` (async), for snoozes with an owner (`target.user_id`): runs before
+  authorization and before the busy-session lane, so an answer counts while the agent is busy.
+  An answer is dropped (`skip`), and so is a message that is not an answer but belongs to a
+  reminder (a reply to it, or the first message after it): it gets the list of valid answers.
+  Every other message passes on. Slash commands are never read as an answer. If the snooze has
+  a `then`, the answer is rewritten into the agent turn instead (`then_prompt`).
+- `post_gateway_admission` (async), for snoozes with no owner (made from the CLI for a home
+  channel): Hermes has already admitted the sender, so any sender in the chat may answer. The
+  same rules, without reply-to (the hook does not get it); a matched message is consumed
+  (`handled`) and a `then` is queued with `inject_message`, as for a reaction.
 - `gateway_platform_event` (sync): a Telegram reaction on the last reminder message. It
   carries no user id and no chat type, so only private chats are accepted: Telegram
   gives them positive chat ids. Hermes has already authorized the reactor.
@@ -29,6 +33,7 @@ import os
 import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from . import commands, echo
@@ -40,6 +45,7 @@ from .store import ACTIVE, PENDING, Snooze, Store, Target
 log = logging.getLogger(__name__)
 
 SKIP = {"action": "skip", "reason": "snooze: answer to a reminder"}
+HANDLED = {"action": "handled"}
 
 _background_tasks: set = set()  # strong references: the event loop keeps only weak ones
 
@@ -74,25 +80,14 @@ def _live_in_chat(snooze: Snooze, platform: str, chat_id: str) -> bool:
     )
 
 
+def _is_answer_text(text: Any) -> bool:
+    """Whether `text` may be an answer: some text, not a slash command."""
+    return isinstance(text, str) and bool(text.strip()) and not text.lstrip().startswith("/")
+
+
 def _is_telegram_private(chat_id: str) -> bool:
     """Telegram gives private chats positive ids; groups, supergroups and channels negative ones."""
     return chat_id.isdigit()
-
-
-def hermes_authorizes(gateway: Any, source: Any) -> bool:
-    """Whether Hermes would let `source`'s sender use the bot (allowed users, pairing...). False when unsure.
-
-    `pre_gateway_dispatch` runs before the gateway's own check, so for a snooze with no user
-    id we ask the gateway (`GatewayRunner._is_user_authorized_for_source`).
-    """
-    check = getattr(gateway, "_is_user_authorized_for_source", None)
-    if check is None:
-        return False
-    try:
-        return check(source) is True
-    except Exception:
-        log.warning("snooze: could not ask Hermes whether the sender is authorized", exc_info=True)
-        return False
 
 
 def then_origin(target: Target, source: Any = None) -> dict:
@@ -116,7 +111,7 @@ def then_origin(target: Target, source: Any = None) -> dict:
 
 
 class Hooks:
-    """The two gateway hooks, and the `then` action. The keyword arguments are the seams used by the tests."""
+    """The three gateway hooks, and the `then` action. The keyword arguments are the seams used by the tests."""
 
     def __init__(
         self,
@@ -126,7 +121,6 @@ class Hooks:
         reply_grace: float = REPLY_GRACE_SECONDS,
         data_dir: Callable[[], str | os.PathLike] = commands.hermes_data_dir,
         now: Callable[[], datetime] = _utcnow,
-        authorizes: Callable[[Any, Any], bool] = hermes_authorizes,
         sender: ReplySender | None = None,
         ensure_timer: Callable[[], Any] | None = None,
         cap_reminders: Callable[[], int] | None = None,
@@ -134,7 +128,6 @@ class Hooks:
         self._ensure_timer = ensure_timer or (lambda: start_timer(ctx))
         self._data_dir = data_dir
         self._now = now
-        self._authorizes = authorizes
         self._sender = sender or HermesSender()
         self._inject = inject or getattr(ctx, "inject_message", None)
         self._reply_grace = reply_grace
@@ -156,27 +149,31 @@ class Hooks:
         except Exception:
             log.warning("snooze: could not start the reminder timer", exc_info=True)
         try:
-            return await self._on_message(event, gateway)
+            return await self._on_message(event)
         except Exception:
             log.warning("snooze: pre_gateway_dispatch failed, message passed on", exc_info=True)
             return None
 
-    async def _on_message(self, event: Any, gateway: Any) -> dict | None:
+    async def _on_message(self, event: Any) -> dict | None:
         source = getattr(event, "source", None)
         text = getattr(event, "text", None)
-        if source is None or not isinstance(text, str) or not text.strip() or text.lstrip().startswith("/"):
+        if source is None or not _is_answer_text(text):
             return None
         platform = commands.platform_name(source.platform)
         chat_id = str(source.chat_id)
 
-        snoozes = [s for s in Store(self._data_dir()).load() if _live_in_chat(s, platform, chat_id)]
+        snoozes = [
+            s
+            for s in Store(self._data_dir()).load()
+            if _live_in_chat(s, platform, chat_id) and s.target.user_id is not None
+        ]
         if not snoozes:
-            return None
+            return None  # a snooze with no owner waits for post_gateway_admission
         user_id = str(source.user_id) if source.user_id else None
         sender = Sender(platform, chat_id, user_id, source.chat_type)
         reply_to = getattr(event, "reply_to_message_id", None)
 
-        decision = self._decide(text, snoozes, sender, reply_to, lambda: self._authorizes(gateway, source))
+        decision = match(text, snoozes, sender, reply_to)
         if decision.action == NONE:
             return None
         applied = self._apply(decision, text)
@@ -190,28 +187,45 @@ class Hooks:
             return {"action": "rewrite", "text": then_prompt(snooze)}
         return SKIP
 
-    @staticmethod
-    def _decide(
-        text: str, snoozes: list[Snooze], sender: Sender, reply_to: Any, authorizes: Callable[[], bool]
-    ) -> Decision:
-        """`confirm.match`, also for snoozes that have no user id (created for a home channel).
+    # -- post_gateway_admission ---------------------------------------------------
 
-        Those accept the sender only if Hermes authorizes them: the check runs once, and only
-        when such a snooze is the one that matched.
-        """
-        open_ids = {s.id for s in snoozes if s.target.user_id is None}
-        if not open_ids:
-            return match(text, snoozes, sender, reply_to)
-        provisional = [
-            dataclasses.replace(s, target=dataclasses.replace(s.target, user_id=sender.user_id))
-            if s.id in open_ids
-            else s
-            for s in snoozes
+    async def post_gateway_admission(
+        self, platform: str = "", source: Any = None, text: Any = None, **_: Any
+    ) -> dict | None:
+        """Hermes hook: `{"action": "handled"}` for an answer to a snooze with no owner, None to let it through."""
+        try:
+            return self._on_admitted(platform, source, text)
+        except Exception:
+            log.warning("snooze: post_gateway_admission failed, message passed on", exc_info=True)
+            return None
+
+    def _on_admitted(self, platform: str, source: Any, text: Any) -> dict | None:
+        """`source` is `SessionSource.to_dict()`. The sender stands in as the user of each owner-less snooze."""
+        if not isinstance(source, dict) or not _is_answer_text(text):
+            return None
+        platform = commands.platform_name(platform)
+        chat_id = str(source.get("chat_id"))
+        user_id = str(source["user_id"]) if source.get("user_id") else None
+        snoozes = [
+            dataclasses.replace(s, target=dataclasses.replace(s.target, user_id=user_id))
+            for s in Store(self._data_dir()).load()
+            if _live_in_chat(s, platform, chat_id) and s.target.user_id is None
         ]
-        decision = match(text, provisional, sender, reply_to)
-        if decision.snooze_id in open_ids and not authorizes():
-            return match(text, [s for s in snoozes if s.id not in open_ids], sender, reply_to)
-        return decision
+        if not snoozes:
+            return None
+        decision = match(text, snoozes, Sender(platform, chat_id, user_id, source.get("chat_type")))
+        if decision.action == NONE:
+            return None
+        applied = self._apply(decision, text)
+        if applied is None:
+            return None
+        reply, snooze = applied
+        # In a task: Hermes frees the chat's session once the hook returns, before the `then` turn is queued.
+        if decision.action == CONFIRM:
+            self._spawn(self._reply_then(snooze, reply, SimpleNamespace(**source)))
+        else:
+            self._spawn(self._reply(snooze.target, reply))
+        return HANDLED
 
     # -- gateway_platform_event ---------------------------------------------------
 
@@ -247,10 +261,10 @@ class Hooks:
         reply, snooze = applied
         self._spawn(self._reply_then(snooze, reply))
 
-    async def _reply_then(self, snooze: Snooze, reply: str) -> None:
+    async def _reply_then(self, snooze: Snooze, reply: str, source: Any = None) -> None:
         """Send the reply, then run the `then` action: in this order, in one task."""
         await self._reply(snooze.target, reply)
-        await self.run_then(snooze)
+        await self.run_then(snooze, source)
 
     def _spawn(self, coro: Any) -> None:
         """Run `coro` as a task on the running gateway loop, which keeps the profile scope."""
@@ -320,11 +334,12 @@ class Hooks:
     async def run_then(self, snooze: Snooze, source: Any = None) -> None:
         """Hand the `then` action of a confirmed snooze to the agent, in the reminder's chat.
 
-        For the paths with no user message to rewrite (a reaction): a text confirm rewrites the
-        message instead (`_on_message`). Called after "✅ Done" is sent, on the gateway loop.
-        `inject_message` queues one agent turn in that chat (in this plugin's own profile); it needs
-        `allow_gateway_injection` and only works inside the gateway. If Hermes refuses or fails, the chat gets
-        "⚠️ then-action failed: <reason>". See `docs/user-guide.md` ("Then-actions").
+        For the paths with no user message to rewrite (a reaction, an answer in `post_gateway_admission`):
+        a text confirm in `pre_gateway_dispatch` rewrites the message instead (`_on_message`). Called after
+        "✅ Done" is sent, on the gateway loop. `inject_message` queues one agent turn in that chat (in this
+        plugin's own profile); it needs `allow_gateway_injection` and only works inside the gateway. If Hermes
+        refuses or fails, the chat gets "⚠️ then-action failed: <reason>". See `docs/user-guide.md`
+        ("Then-actions").
         """
         if not snooze.then:
             return
@@ -353,12 +368,13 @@ class Hooks:
 
 # -- registration ----------------------------------------------------------------------
 
-HOOK_NAMES = ("pre_gateway_dispatch", "gateway_platform_event")
+HOOK_NAMES = ("pre_gateway_dispatch", "post_gateway_admission", "gateway_platform_event")
 
 
 def register_all(ctx: Any) -> Hooks:
     """Register the gateway hooks on `ctx` (`HOOK_NAMES`, also listed in plugin.yaml)."""
     hooks = Hooks(ctx)
     ctx.register_hook("pre_gateway_dispatch", hooks.pre_gateway_dispatch)
+    ctx.register_hook("post_gateway_admission", hooks.post_gateway_admission)
     ctx.register_hook("gateway_platform_event", hooks.gateway_platform_event)
     return hooks

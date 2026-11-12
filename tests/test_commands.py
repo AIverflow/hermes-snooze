@@ -1497,5 +1497,57 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(Store(tmp.name).load(), [])
 
 
+class CronThenTest(Base):
+    """snooze_create with `then` inside a cron run needs cron.allow_agent_scheduling."""
+
+    def setUp(self):
+        super().setUp()
+        self.env = {"HERMES_SESSION_PLATFORM": "telegram", "HERMES_SESSION_CHAT_ID": "123"}
+
+    def call(self, **args):
+        return json.loads(self.cmds.tool({"text": "Photo", "first_at": "2026-11-07T16:00", **args}))
+
+    def in_cron(self, allow):
+        """Pretend to be a cron run, with cron.allow_agent_scheduling set to `allow`."""
+        self.ctx.current_cron_execution = lambda: object()
+        config = {"cron": {"allow_agent_scheduling": allow}}
+        return mock.patch.dict(
+            "sys.modules", {"hermes_cli.config": SimpleNamespace(load_config_readonly=lambda: config)}
+        )
+
+    def test_cron_then_with_setting_off_is_refused(self):
+        with self.in_cron(False):
+            result = self.call(then="send the photo")
+        self.assertEqual(
+            result["error"], "then is not allowed in a cron run unless cron.allow_agent_scheduling is true"
+        )
+        self.assertEqual(self.store.load(), [])
+
+    def test_cron_then_with_setting_missing_is_refused(self):
+        self.ctx.current_cron_execution = lambda: object()
+        with mock.patch.dict("sys.modules", {"hermes_cli.config": SimpleNamespace(load_config_readonly=lambda: {})}):
+            self.assertIn("error", self.call(then="send"))
+        self.assertEqual(self.store.load(), [])
+
+    def test_cron_then_with_setting_on_is_created(self):
+        with self.in_cron(True):
+            result = self.call(then="send the photo")
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.store.load()[0].then, "send the photo")
+
+    def test_cron_without_then_is_created(self):
+        with self.in_cron(False):
+            result = self.call()
+        self.assertTrue(result["ok"])
+        self.assertIsNone(self.store.load()[0].then)
+
+    def test_not_in_cron_then_is_created_without_reading_config(self):
+        # The config module is unavailable here: it must not be imported outside a cron run.
+        with mock.patch.dict("sys.modules", {"hermes_cli.config": None}):
+            result = self.call(then="send the photo")
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.store.load()[0].then, "send the photo")
+
+
 if __name__ == "__main__":
     unittest.main()

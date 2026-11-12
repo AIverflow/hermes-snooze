@@ -300,7 +300,15 @@ class _PendingTimer:
         return self._state in (self._SUPERSEDED, self._FINISHED)
 
 
+def _cancel_on_unload(ctx: Any, future: Any) -> None:
+    """Cancel a timer future that runs on the gateway loop when the plugin unloads or reloads."""
+    on_unload = getattr(ctx, "on_unload", None)
+    if on_unload is not None:  # a Hermes without `on_unload`: nothing to hook into
+        on_unload(future.cancel)
+
+
 def _wait_and_hand_over(
+    ctx: Any,
     key: str,
     pending: _PendingTimer,
     coro: Any,
@@ -338,6 +346,7 @@ def _wait_and_hand_over(
             logger.warning("snooze timer: not started (scheduling failed)", exc_info=True)
             return
         handed = True
+        _cancel_on_unload(ctx, future)
         if _timers.get(key) is pending:
             _timers[key] = future
         logger.info("snooze timer: started on the gateway loop (waited %.0fs)", time.monotonic() - started)
@@ -400,12 +409,14 @@ def start_timer(ctx: Any, *, wait_timeout: float = WAIT_TIMEOUT_SECONDS, wait_po
     coro = timer.run()
     if not on_this_loop and loop is None:
         logger.info("snooze timer: gateway loop not ready (%s)", reason)
-        return _start_waiter(key, coro, wait_timeout, wait_poll, reason)
+        return _start_waiter(ctx, key, coro, wait_timeout, wait_poll, reason)
     try:
         if loop is None:
             _timers[key] = ctx.spawn_task(coro, name="snooze:timer")
         else:
-            _timers[key] = asyncio.run_coroutine_threadsafe(coro, loop)
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            _cancel_on_unload(ctx, future)
+            _timers[key] = future
     except Exception:  # a closed loop, or a Hermes without spawn_task
         coro.close()
         logger.warning("snooze timer: not started (scheduling failed)", exc_info=True)
@@ -414,7 +425,7 @@ def start_timer(ctx: Any, *, wait_timeout: float = WAIT_TIMEOUT_SECONDS, wait_po
     return True
 
 
-def _start_waiter(key: str, coro: Any, timeout: float, poll: float, reason: str) -> bool:
+def _start_waiter(ctx: Any, key: str, coro: Any, timeout: float, poll: float, reason: str) -> bool:
     """Record a pending marker and start the waiter thread. Always False: nothing is running yet."""
     pending = _PendingTimer()
     _timers[key] = pending  # before the thread starts: a second call must see it
@@ -422,7 +433,7 @@ def _start_waiter(key: str, coro: Any, timeout: float, poll: float, reason: str)
     scope = contextvars.copy_context()
     thread = threading.Thread(
         target=scope.run,
-        args=(_wait_and_hand_over, key, pending, coro, timeout, poll, reason),
+        args=(_wait_and_hand_over, ctx, key, pending, coro, timeout, poll, reason),
         name="snooze-timer-wait",
         daemon=True,
     )

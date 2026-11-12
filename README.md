@@ -124,8 +124,8 @@ Use cron for reports, scripts and agent tasks on a schedule. Use Snooze when som
 ## What Snooze runs and stores
 
 - A timer task inside the Hermes gateway checks every 15 s and sends due reminders through Hermes' own send path. No LLM call, no network call of its own, no telemetry, no credentials.
-- The `pre_gateway_dispatch` hook reads each incoming gateway text message before the agent. It acts only in a chat with a running snooze: an answer, or a message that replies to a reminder or comes first after one, is handled by Snooze and does not reach the agent. Everything else passes untouched. The `gateway_platform_event` hook reads Telegram reactions.
-- A `then` action asks the agent to act: your answer is rewritten into the request, or, after a reaction or `/snooze ok`, one agent turn is queued with `inject_message` (needs `allow_gateway_injection`).
+- The `pre_gateway_dispatch` hook reads each incoming gateway text message before the agent, for snoozes that have a user; the `post_gateway_admission` hook does the same for snoozes with no user (made from the CLI for a home channel), after Hermes has admitted the sender. They act only in a chat with a running snooze: an answer, or a message that replies to a reminder or comes first after one, is handled by Snooze and does not reach the agent. Everything else passes untouched. The `gateway_platform_event` hook reads Telegram reactions.
+- A `then` action asks the agent to act: your answer is rewritten into the request, or, after a reaction, `/snooze ok` or an answer to a snooze with no user, one agent turn is queued with `inject_message` (needs `allow_gateway_injection`).
 - Data: `snoozes.json` and two lock files in the plugin data folder, and the `notification_platform` setting in `config.yaml`.
 - Two private Hermes names are used (`send_message_tool`, `estop.is_engaged`); a daily GitHub check runs the plugin against new Hermes releases.
 

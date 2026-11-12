@@ -253,6 +253,8 @@ def reminder_text(snooze: Snooze, late_by: timedelta | None = None) -> str:
     text = f"🔔 Snooze #{snooze.id}: {snooze.text}{tail}"
     if late_by is not None:
         text += f"\n⏰ late by {format_minutes(round(late_by.total_seconds() / 60))}"
+    if snooze.then:
+        text += f"\nThen: {snooze.then}"
     if options:
         text += "\n" + numbered(options)
     return text
