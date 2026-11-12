@@ -6,11 +6,9 @@ If an `AGENTS.local.md` exists next to this file, read it too: the maintainer's 
 
 ## Language
 
-Domain terms (snooze, reminder, occurrence, confirm rule, ...) are defined in `CONTEXT.md`. Use them in code, docs and tickets.
+Domain terms (snooze, reminder, occurrence, confirm rule, ...) are defined in `CONTEXT.md`. Use them in code and docs.
 
 ## Code layout
-
-Before any ticket, read `.tickets/WORKFLOW.md`.
 
 The repo root is the plugin folder.
 

@@ -230,7 +230,7 @@ class Later(unittest.TestCase):
 
 
 class Invalid(unittest.TestCase):
-    """A message that is not an answer, but that Snooze owns (the ticket's rules 2 and 3)."""
+    """A message that is not an answer, but that Snooze owns: a reply to a reminder, or the first message after one."""
 
     def test_unrelated_message_is_left_alone(self):
         self.assertEqual(run("what's the weather?").action, "none")
