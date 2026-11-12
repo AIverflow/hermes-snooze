@@ -4,6 +4,8 @@ hermes-snooze is a plugin for [Hermes Agent](https://github.com/NousResearch/her
 
 Add a follow-up and your agent acts after you answer. Add choices and it acts on the option you pick. The command is `/snooze`.
 
+https://github.com/user-attachments/assets/88a98031-fcbe-4a38-b203-22e5a15b81d9
+
 ## Before you start
 
 hermes-snooze sends its reminders through a messaging platform, so **Hermes needs at least one platform configured** (for example Telegram or Discord). Without one there is no chat to remind you in. Requires Hermes Agent 0.22.7 or later and Python 3.11+ (the same as Hermes).
